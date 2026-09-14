@@ -1,0 +1,7 @@
+{
+  "indentWidth": 2,
+  "lineWidth": 88,
+  "quoteStyle": "double",
+  "semicolons": "always",
+  "ignorePatterns": ["dist", "coverage", "node_modules", "**/*.md", "**/*.json"]
+}

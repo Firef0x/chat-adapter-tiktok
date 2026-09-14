@@ -10,15 +10,8 @@ export {
 export { cardToPlainText } from "./lib/card-to-text.js";
 export { TikTokFormatConverter } from "./lib/format-converter.js";
 export { cardToTemplate, TEMPLATE_LIMITS } from "./lib/template.js";
-export {
-  channelIdFromThreadId,
-  decodeThreadId,
-  encodeThreadId,
-} from "./lib/thread-id.js";
-export {
-  TikTokTokenManager,
-  type TokenManagerOptions,
-} from "./lib/token-manager.js";
+export { channelIdFromThreadId, decodeThreadId, encodeThreadId } from "./lib/thread-id.js";
+export { TikTokTokenManager, type TokenManagerOptions } from "./lib/token-manager.js";
 export {
   type ParsedSignature,
   parseSignatureHeader,

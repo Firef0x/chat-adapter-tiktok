@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  channelIdFromThreadId,
-  decodeThreadId,
-  encodeThreadId,
-} from "../../src/lib/thread-id.js";
+import { channelIdFromThreadId, decodeThreadId, encodeThreadId } from "../../src/lib/thread-id.js";
 
 describe("thread IDs", () => {
   it("round-trips a business and conversation pair", () => {
@@ -63,8 +59,8 @@ describe("thread IDs", () => {
   });
 
   it("rejects encoding without a conversation ID", () => {
-    expect(() =>
-      encodeThreadId({ businessId: "biz_123", conversationId: "" }),
-    ).toThrow(/conversationId is required/);
+    expect(() => encodeThreadId({ businessId: "biz_123", conversationId: "" })).toThrow(
+      /conversationId is required/,
+    );
   });
 });

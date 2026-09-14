@@ -1,8 +1,4 @@
-import {
-  AdapterRateLimitError,
-  AuthenticationError,
-  NetworkError,
-} from "@chat-adapter/shared";
+import { AdapterRateLimitError, AuthenticationError, NetworkError } from "@chat-adapter/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { REFRESH_SKEW_MS, TikTokTokenManager } from "../../src/lib/token-manager.js";
@@ -45,9 +41,7 @@ describe("TikTokTokenManager", () => {
     now = 1_000_000_000_000;
   });
 
-  function build(
-    options: Partial<ConstructorParameters<typeof TikTokTokenManager>[0]> = {},
-  ) {
+  function build(options: Partial<ConstructorParameters<typeof TikTokTokenManager>[0]> = {}) {
     const fetchImpl = vi.fn(async () => tokenEnvelope());
     const manager = new TikTokTokenManager({
       appId: "app_1",
@@ -127,9 +121,7 @@ describe("TikTokTokenManager", () => {
     await manager.refreshAccessToken();
     await manager.refreshAccessToken();
 
-    const second = JSON.parse(
-      (fetchImpl.mock.calls[1] as [string, RequestInit])[1].body as string,
-    );
+    const second = JSON.parse((fetchImpl.mock.calls[1] as [string, RequestInit])[1].body as string);
     expect(second.refresh_token).toBe("refresh_new");
   });
 
@@ -203,9 +195,7 @@ describe("TikTokTokenManager", () => {
     const { manager } = build({ accessTokenExpiresAt: 0, fetchImpl: fetchImpl as never });
 
     await expect(manager.getAccessToken()).rejects.toBeInstanceOf(NetworkError);
-    await expect(manager.getAccessToken()).rejects.not.toBeInstanceOf(
-      AuthenticationError,
-    );
+    await expect(manager.getAccessToken()).rejects.not.toBeInstanceOf(AuthenticationError);
   });
 
   it("keeps existing credentials when the refresh response is incomplete", async () => {

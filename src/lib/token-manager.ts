@@ -77,8 +77,7 @@ export class TikTokTokenManager implements AccessTokenProvider {
     // An unknown expiry is treated as already expired: one refresh up front
     // beats discovering the expiry through a failed API call.
     this.accessTokenExpiresAt = options.accessTokenExpiresAt ?? 0;
-    this.refreshTokenExpiresAt =
-      options.refreshTokenExpiresAt ?? Number.POSITIVE_INFINITY;
+    this.refreshTokenExpiresAt = options.refreshTokenExpiresAt ?? Number.POSITIVE_INFINITY;
   }
 
   /** Current credentials, for a host that wants to persist them. */
@@ -201,10 +200,7 @@ export class TikTokTokenManager implements AccessTokenProvider {
    * has to re-authorize.
    */
   private refreshFailure(envelope: TikTokApiEnvelope<unknown>): Error {
-    if (
-      envelope.code === TIKTOK_CODE.RATE_LIMITED ||
-      envelope.code === TIKTOK_CODE.SYSTEM_ERROR
-    ) {
+    if (envelope.code === TIKTOK_CODE.RATE_LIMITED || envelope.code === TIKTOK_CODE.SYSTEM_ERROR) {
       return mapTikTokError(envelope.code, envelope.message, envelope.request_id);
     }
 

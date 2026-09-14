@@ -24,9 +24,7 @@ function errorResponse(code: number, message = "nope") {
   } as unknown as Response;
 }
 
-function messageContent(
-  overrides: Partial<TikTokMessageContent> = {},
-): TikTokMessageContent {
+function messageContent(overrides: Partial<TikTokMessageContent> = {}): TikTokMessageContent {
   return {
     from: "someuser",
     to: "acmebrand",
@@ -80,17 +78,27 @@ function build(fetchImpl = vi.fn(async () => okResponse({}))) {
   return { adapter, fetchImpl };
 }
 
+/**
+ * A message as the REST history endpoint returns it: UPPERCASE `message_type`
+ * and no `conversation_id`, unlike the webhook payload.
+ */
+function restMessage(overrides: Record<string, unknown> = {}) {
+  return {
+    message_id: "m1",
+    message_type: "TEXT",
+    timestamp: 1_700_000_000_000,
+    text: { body: "from history" },
+    ...overrides,
+  };
+}
+
 /** Minimal ChatInstance stand-in that records dispatched messages. */
-function attachChat(adapter: TikTokAdapter) {
+function attachChat() {
   const processed: Array<{ threadId: string; factory: () => Promise<unknown> }> = [];
   const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
   const chat = {
     getLogger: () => logger,
-    processMessage: (
-      _adapter: unknown,
-      threadId: string,
-      factory: () => Promise<unknown>,
-    ) => {
+    processMessage: (_adapter: unknown, threadId: string, factory: () => Promise<unknown>) => {
       processed.push({ threadId, factory });
     },
   };
@@ -117,12 +125,12 @@ describe("TikTokAdapter", () => {
 
   describe("handleWebhook", () => {
     beforeEach(async () => {
-      const { chat } = attachChat(adapter);
+      const { chat } = attachChat();
       await adapter.initialize(chat as never);
     });
 
     it("accepts a correctly signed inbound message", async () => {
-      const { chat, processed } = attachChat(adapter);
+      const { chat, processed } = attachChat();
       await adapter.initialize(chat as never);
 
       const response = await adapter.handleWebhook(
@@ -134,7 +142,7 @@ describe("TikTokAdapter", () => {
     });
 
     it("rejects a wrongly signed request with 401 and ingests nothing", async () => {
-      const { chat, processed } = attachChat(adapter);
+      const { chat, processed } = attachChat();
       await adapter.initialize(chat as never);
 
       const response = await adapter.handleWebhook(
@@ -146,7 +154,7 @@ describe("TikTokAdapter", () => {
     });
 
     it("rejects a replayed request", async () => {
-      const { chat, processed } = attachChat(adapter);
+      const { chat, processed } = attachChat();
       await adapter.initialize(chat as never);
 
       const response = await adapter.handleWebhook(
@@ -161,7 +169,7 @@ describe("TikTokAdapter", () => {
 
     it("ingests a retried delivery only once", async () => {
       // TikTok retries on any non-2xx, so the same message_id reappears.
-      const { chat, processed } = attachChat(adapter);
+      const { chat, processed } = attachChat();
       await adapter.initialize(chat as never);
 
       await adapter.handleWebhook(webhookRequest("im_receive_msg", messageContent()));
@@ -171,7 +179,7 @@ describe("TikTokAdapter", () => {
     });
 
     it("ignores the stripped EU event, which carries no content", async () => {
-      const { chat, processed } = attachChat(adapter);
+      const { chat, processed } = attachChat();
       await adapter.initialize(chat as never);
 
       const response = await adapter.handleWebhook(
@@ -187,7 +195,7 @@ describe("TikTokAdapter", () => {
     });
 
     it("ignores read receipts and other non-message events", async () => {
-      const { chat, processed } = attachChat(adapter);
+      const { chat, processed } = attachChat();
       await adapter.initialize(chat as never);
 
       await adapter.handleWebhook(
@@ -199,7 +207,7 @@ describe("TikTokAdapter", () => {
 
     it("answers 200 on a malformed payload so TikTok stops retrying it", async () => {
       // A body that cannot be parsed will never parse — retrying is pointless.
-      const { chat, logger } = attachChat(adapter);
+      const { chat, logger } = attachChat();
       await adapter.initialize(chat as never);
 
       const body = JSON.stringify({
@@ -212,11 +220,7 @@ describe("TikTokAdapter", () => {
       const request = new Request("https://example.com/webhooks/tiktok", {
         method: "POST",
         headers: {
-          "tiktok-signature": signWebhookBody(
-            body,
-            APP_SECRET,
-            Math.floor(Date.now() / 1000),
-          ),
+          "tiktok-signature": signWebhookBody(body, APP_SECRET, Math.floor(Date.now() / 1000)),
         },
         body,
       });
@@ -268,7 +272,7 @@ describe("TikTokAdapter", () => {
 
     it("refuses a webhook addressed to a different business account", async () => {
       // One app URL receives webhooks for every authorized account.
-      const { chat, processed, logger } = attachChat(adapter);
+      const { chat, processed, logger } = attachChat();
       await adapter.initialize(chat as never);
 
       const body = JSON.stringify({
@@ -281,11 +285,7 @@ describe("TikTokAdapter", () => {
       const request = new Request("https://example.com/webhooks/tiktok", {
         method: "POST",
         headers: {
-          "tiktok-signature": signWebhookBody(
-            body,
-            APP_SECRET,
-            Math.floor(Date.now() / 1000),
-          ),
+          "tiktok-signature": signWebhookBody(body, APP_SECRET, Math.floor(Date.now() / 1000)),
         },
         body,
       });
@@ -315,11 +315,9 @@ describe("TikTokAdapter", () => {
     it("marks TikTok's echo of our own send as isMe so the bot ignores it", async () => {
       // im_send_msg fires for API sends too. Without this the bot would read
       // its own reply as new input and answer itself.
-      const sendFetch = vi.fn(async () =>
-        okResponse({ message: { message_id: "msg_sent_1" } }),
-      );
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_sent_1" } }));
       const { adapter: local } = build(sendFetch);
-      const { chat, processed } = attachChat(local);
+      const { chat, processed } = attachChat();
       await local.initialize(chat as never);
 
       const threadId = local.encodeThreadId({
@@ -377,7 +375,7 @@ describe("TikTokAdapter", () => {
 
     it("leaves a human agent's message from the TikTok app as not isMe", async () => {
       // Sent by the business account but not by this runtime — a colleague.
-      const { chat, processed } = attachChat(adapter);
+      const { chat, processed } = attachChat();
       await adapter.initialize(chat as never);
 
       await adapter.handleWebhook(
@@ -449,18 +447,14 @@ describe("TikTokAdapter", () => {
     });
 
     it("treats inbound text literally rather than as markdown", () => {
-      const message = adapter.parseMessage(
-        messageContent({ text: { body: "*not emphasis*" } }),
-      );
+      const message = adapter.parseMessage(messageContent({ text: { body: "*not emphasis*" } }));
       expect(message.text).toBe("*not emphasis*");
     });
   });
 
   describe("postMessage", () => {
     it("sends text to the conversation and returns the message ID", async () => {
-      const sendFetch = vi.fn(async () =>
-        okResponse({ message: { message_id: "msg_out" } }),
-      );
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_out" } }));
       const { adapter: local } = build(sendFetch);
       const threadId = local.encodeThreadId({
         businessId: BUSINESS_ID,
@@ -482,9 +476,7 @@ describe("TikTokAdapter", () => {
     });
 
     it("flattens a markdown postable to plain text", async () => {
-      const sendFetch = vi.fn(async () =>
-        okResponse({ message: { message_id: "msg_out" } }),
-      );
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_out" } }));
       const { adapter: local } = build(sendFetch);
       const threadId = local.encodeThreadId({
         businessId: BUSINESS_ID,
@@ -493,16 +485,12 @@ describe("TikTokAdapter", () => {
 
       await local.postMessage(threadId, { markdown: "**bold** text" });
 
-      const body = JSON.parse(
-        (sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string,
-      );
+      const body = JSON.parse((sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
       expect(body.text.body).toBe("bold text");
     });
 
     it("sends a fitting card as a Q&A button card", async () => {
-      const sendFetch = vi.fn(async () =>
-        okResponse({ message: { message_id: "msg_out" } }),
-      );
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_out" } }));
       const { adapter: local } = build(sendFetch);
       const threadId = local.encodeThreadId({
         businessId: BUSINESS_ID,
@@ -522,9 +510,7 @@ describe("TikTokAdapter", () => {
         },
       } as never);
 
-      const body = JSON.parse(
-        (sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string,
-      );
+      const body = JSON.parse((sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
       expect(body.message_type).toBe("TEMPLATE");
       expect(body.template).toMatchObject({
         type: "QA_BUTTON_CARD",
@@ -536,9 +522,7 @@ describe("TikTokAdapter", () => {
 
     it("falls back to text for a card that cannot be a template", async () => {
       // Four buttons exceeds the documented maximum of three.
-      const sendFetch = vi.fn(async () =>
-        okResponse({ message: { message_id: "msg_out" } }),
-      );
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_out" } }));
       const { adapter: local } = build(sendFetch);
       const threadId = local.encodeThreadId({
         businessId: BUSINESS_ID,
@@ -563,9 +547,7 @@ describe("TikTokAdapter", () => {
         },
       } as never);
 
-      const body = JSON.parse(
-        (sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string,
-      );
+      const body = JSON.parse((sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
       expect(body.message_type).toBe("TEXT");
       // The options must still be visible, not silently dropped.
       expect(body.text.body).toContain("A");
@@ -573,9 +555,7 @@ describe("TikTokAdapter", () => {
     });
 
     it("honours useTemplates: false by always sending text", async () => {
-      const sendFetch = vi.fn(async () =>
-        okResponse({ message: { message_id: "msg_out" } }),
-      );
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_out" } }));
       const local = new TikTokAdapter({
         appId: "app_1",
         appSecret: APP_SECRET,
@@ -604,9 +584,7 @@ describe("TikTokAdapter", () => {
         },
       } as never);
 
-      const body = JSON.parse(
-        (sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string,
-      );
+      const body = JSON.parse((sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
       expect(body.message_type).toBe("TEXT");
       expect(body.text.body).toContain("Track order");
     });
@@ -616,9 +594,7 @@ describe("TikTokAdapter", () => {
         businessId: BUSINESS_ID,
         conversationId: CONVERSATION_ID,
       });
-      await expect(adapter.postMessage(threadId, "")).rejects.toBeInstanceOf(
-        ValidationError,
-      );
+      await expect(adapter.postMessage(threadId, "")).rejects.toBeInstanceOf(ValidationError);
       expect(fetchImpl).not.toHaveBeenCalled();
     });
 
@@ -627,9 +603,7 @@ describe("TikTokAdapter", () => {
         businessId: BUSINESS_ID,
         conversationId: CONVERSATION_ID,
       });
-      await expect(
-        adapter.postMessage(threadId, "x".repeat(6001)),
-      ).rejects.toThrow(/at most 6000/);
+      await expect(adapter.postMessage(threadId, "x".repeat(6001))).rejects.toThrow(/at most 6000/);
       expect(fetchImpl).not.toHaveBeenCalled();
     });
 
@@ -641,9 +615,7 @@ describe("TikTokAdapter", () => {
         conversationId: CONVERSATION_ID,
       });
 
-      await expect(local.postMessage(threadId, "hi")).rejects.toBeInstanceOf(
-        ValidationError,
-      );
+      await expect(local.postMessage(threadId, "hi")).rejects.toBeInstanceOf(ValidationError);
     });
   });
 
@@ -655,9 +627,7 @@ describe("TikTokAdapter", () => {
       });
       await adapter.startTyping(threadId);
 
-      const body = JSON.parse(
-        (fetchImpl.mock.calls[0] as [string, RequestInit])[1].body as string,
-      );
+      const body = JSON.parse((fetchImpl.mock.calls[0] as [string, RequestInit])[1].body as string);
       expect(body).toMatchObject({
         message_type: "SENDER_ACTION",
         sender_action: "TYPING",
@@ -671,26 +641,12 @@ describe("TikTokAdapter", () => {
       });
       await adapter.markAsRead(threadId);
 
-      const body = JSON.parse(
-        (fetchImpl.mock.calls[0] as [string, RequestInit])[1].body as string,
-      );
+      const body = JSON.parse((fetchImpl.mock.calls[0] as [string, RequestInit])[1].body as string);
       expect(body.sender_action).toBe("MARK_READ");
     });
   });
 
   describe("fetchMessages", () => {
-    // REST history uses UPPERCASE `message_type` and carries no
-    // conversation_id — a different shape from the webhook payload.
-    function restMessage(overrides: Record<string, unknown> = {}) {
-      return {
-        message_id: "m1",
-        message_type: "TEXT",
-        timestamp: 1_700_000_000_000,
-        text: { body: "from history" },
-        ...overrides,
-      };
-    }
-
     function listFetchOf(messages: unknown[]) {
       return vi.fn(async () => okResponse({ messages, participants: [] }));
     }
@@ -735,9 +691,7 @@ describe("TikTokAdapter", () => {
     });
 
     it("skips an entry with no message_id instead of failing the page", async () => {
-      const { adapter: local } = build(
-        listFetchOf([restMessage(), { message_type: "TEXT" }]),
-      );
+      const { adapter: local } = build(listFetchOf([restMessage(), { message_type: "TEXT" }]));
 
       const result = await local.fetchMessages(threadFor(local));
 
@@ -783,9 +737,7 @@ describe("TikTokAdapter", () => {
     it("gives a usable date when history omits the timestamp", async () => {
       // `new Date(undefined)` is an Invalid Date, which corrupts ordering
       // silently because it compares false against everything.
-      const { adapter: local } = build(
-        listFetchOf([restMessage({ timestamp: undefined })]),
-      );
+      const { adapter: local } = build(listFetchOf([restMessage({ timestamp: undefined })]));
 
       const result = await local.fetchMessages(threadFor(local));
 

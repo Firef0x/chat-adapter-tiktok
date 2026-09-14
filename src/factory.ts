@@ -24,9 +24,7 @@ export function createTikTokAdapter(
 ): TikTokAdapter {
   const resolved = {} as Record<keyof typeof ENV_VARS, string>;
 
-  for (const [key, envVar] of Object.entries(ENV_VARS) as Array<
-    [keyof typeof ENV_VARS, string]
-  >) {
+  for (const [key, envVar] of Object.entries(ENV_VARS) as Array<[keyof typeof ENV_VARS, string]>) {
     const value = config?.[key] ?? process.env[envVar];
     if (!value) {
       throw new ValidationError(

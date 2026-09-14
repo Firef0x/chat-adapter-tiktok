@@ -48,9 +48,7 @@ function childToPlainText(child: CardChild): string | null {
       return `${child.label} (${child.url})`;
 
     case "fields":
-      return joinNonEmpty(
-        child.children.map((field) => `${field.label}: ${field.value}`),
-      );
+      return joinNonEmpty(child.children.map((field) => `${field.label}: ${field.value}`));
 
     case "section":
       return joinNonEmpty(child.children.map(childToPlainText));
@@ -94,9 +92,7 @@ function actionToPlainText(action: ActionChild): string | null {
 
     case "select":
     case "radio_select": {
-      const options = action.options.map(
-        (option) => `${OPTION_BULLET}${option.label}`,
-      );
+      const options = action.options.map((option) => `${OPTION_BULLET}${option.label}`);
       return joinNonEmpty([`${action.label}:`, ...options]);
     }
 

@@ -28,20 +28,14 @@ export function encodeThreadId(data: TikTokThreadId): string {
 export function decodeThreadId(threadId: string): TikTokThreadId {
   const parts = threadId.split(":");
   if (parts.length !== 3 || parts[0] !== ADAPTER_NAME) {
-    throw new ValidationError(
-      ADAPTER_NAME,
-      `Invalid TikTok thread ID: ${threadId}`,
-    );
+    throw new ValidationError(ADAPTER_NAME, `Invalid TikTok thread ID: ${threadId}`);
   }
 
   const businessId = Buffer.from(parts[1] as string, "base64url").toString();
   const conversationId = Buffer.from(parts[2] as string, "base64url").toString();
 
   if (!businessId || !conversationId) {
-    throw new ValidationError(
-      ADAPTER_NAME,
-      `Invalid TikTok thread ID: ${threadId}`,
-    );
+    throw new ValidationError(ADAPTER_NAME, `Invalid TikTok thread ID: ${threadId}`);
   }
 
   // Base64url decoding silently discards invalid characters, so a corrupted
@@ -50,10 +44,7 @@ export function decodeThreadId(threadId: string): TikTokThreadId {
   // Re-encoding and comparing makes the encoding canonical.
   const decoded = { businessId, conversationId };
   if (encodeThreadId(decoded) !== threadId) {
-    throw new ValidationError(
-      ADAPTER_NAME,
-      `Invalid TikTok thread ID: ${threadId}`,
-    );
+    throw new ValidationError(ADAPTER_NAME, `Invalid TikTok thread ID: ${threadId}`);
   }
 
   return decoded;

@@ -204,12 +204,7 @@ export type TikTokRestMessageType =
   | "OTHER";
 
 /** Message types accepted by the send endpoint. Narrower than inbound. */
-export type TikTokSendMessageType =
-  | "TEXT"
-  | "IMAGE"
-  | "SHARE_POST"
-  | "TEMPLATE"
-  | "SENDER_ACTION";
+export type TikTokSendMessageType = "TEXT" | "IMAGE" | "SHARE_POST" | "TEMPLATE" | "SENDER_ACTION";
 
 export type TikTokRestRole = "BUSINESS_ACCOUNT" | "PERSONAL_ACCOUNT";
 
@@ -273,10 +268,7 @@ export interface TikTokSendMessageData {
  * This is the `TRawMessage` generic of the Chat SDK `Adapter` interface: the
  * webhook content for inbound messages, and the send result for outbound ones.
  */
-export type TikTokRawMessage =
-  | TikTokMessageContent
-  | TikTokRestMessage
-  | TikTokSendMessageData;
+export type TikTokRawMessage = TikTokMessageContent | TikTokRestMessage | TikTokSendMessageData;
 
 // ---------------------------------------------------------------------------
 // Conversations and history

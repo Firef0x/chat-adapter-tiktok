@@ -166,10 +166,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
   // Webhooks
   // -------------------------------------------------------------------------
 
-  async handleWebhook(
-    request: Request,
-    options?: WebhookOptions,
-  ): Promise<Response> {
+  async handleWebhook(request: Request, options?: WebhookOptions): Promise<Response> {
     // Read the raw bytes first: the HMAC covers exactly what was sent, and a
     // parsed-then-re-serialized body will not reproduce it.
     const rawBody = await request.text();
@@ -203,10 +200,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     return new Response("OK", { status: 200 });
   }
 
-  private async processEnvelope(
-    rawBody: string,
-    options?: WebhookOptions,
-  ): Promise<void> {
+  private async processEnvelope(rawBody: string, options?: WebhookOptions): Promise<void> {
     const envelope = JSON.parse(rawBody) as TikTokWebhookEnvelope;
 
     // Only these two carry a usable message. `im_receive_msg_eu` is
@@ -264,12 +258,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     // never reached the host is not remembered as delivered.
     this.seenMessages.add(content.message_id);
 
-    await this.chat.processMessage(
-      this,
-      threadId,
-      async () => this.parseMessage(content),
-      options,
-    );
+    await this.chat.processMessage(this, threadId, async () => this.parseMessage(content), options);
   }
 
   // -------------------------------------------------------------------------
@@ -421,10 +410,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     const text = this.converter.renderPostable(message);
 
     if (!text) {
-      throw new ValidationError(
-        ADAPTER_NAME,
-        "Cannot send an empty message to TikTok.",
-      );
+      throw new ValidationError(ADAPTER_NAME, "Cannot send an empty message to TikTok.");
     }
     if (text.length > MAX_TEXT_LENGTH) {
       throw new ValidationError(
@@ -479,10 +465,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     await this.sendSenderAction(threadId, "MARK_READ");
   }
 
-  private async sendSenderAction(
-    threadId: string,
-    action: "TYPING" | "MARK_READ",
-  ): Promise<void> {
+  private async sendSenderAction(threadId: string, action: "TYPING" | "MARK_READ"): Promise<void> {
     const { conversationId } = this.decodeThreadId(threadId);
     await this.api.request<TikTokSendMessageData>({
       method: "POST",
@@ -532,9 +515,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
 
     // TikTok does not document the ordering of this endpoint, so it is sorted
     // rather than assumed: `limit` must trim the oldest, not an arbitrary end.
-    messages.sort(
-      (a, b) => a.metadata.dateSent.getTime() - b.metadata.dateSent.getTime(),
-    );
+    messages.sort((a, b) => a.metadata.dateSent.getTime() - b.metadata.dateSent.getTime());
 
     // `limit: 0` means none. Testing truthiness would return everything, the
     // opposite of what the caller asked for.

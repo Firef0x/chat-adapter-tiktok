@@ -62,14 +62,22 @@ describe("cardToTemplate", () => {
   it("declines an over-long button label rather than truncating it", () => {
     // Truncating would change what the user believes they are agreeing to.
     const long = [
-      { type: "button" as const, id: "b", label: "x".repeat(TEMPLATE_LIMITS.maxButtonTitleLength + 1) },
+      {
+        type: "button" as const,
+        id: "b",
+        label: "x".repeat(TEMPLATE_LIMITS.maxButtonTitleLength + 1),
+      },
     ];
     expect(cardToTemplate(card("Q", long))).toBeNull();
   });
 
   it("declines an over-long button id", () => {
     const long = [
-      { type: "button" as const, id: "x".repeat(TEMPLATE_LIMITS.maxButtonIdLength + 1), label: "Ok" },
+      {
+        type: "button" as const,
+        id: "x".repeat(TEMPLATE_LIMITS.maxButtonIdLength + 1),
+        label: "Ok",
+      },
     ];
     expect(cardToTemplate(card("Q", long))).toBeNull();
   });

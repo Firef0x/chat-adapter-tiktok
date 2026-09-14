@@ -52,11 +52,7 @@ export interface TikTokRequest {
  * `AdapterRateLimitError` and `NetworkError` are worth retrying, and
  * everything else is not.
  */
-export function mapTikTokError(
-  code: number,
-  message: string,
-  requestId?: string,
-): Error {
+export function mapTikTokError(code: number, message: string, requestId?: string): Error {
   const detail = requestId ? `${message} (request_id: ${requestId})` : message;
 
   switch (code) {
@@ -83,10 +79,7 @@ export function mapTikTokError(
       // fault or one TikTok added after this release; a spurious retry costs
       // one request, while a spurious permanent failure discards a message
       // that would have succeeded.
-      return new NetworkError(
-        ADAPTER_NAME,
-        `Unrecognized TikTok error ${code}: ${detail}`,
-      );
+      return new NetworkError(ADAPTER_NAME, `Unrecognized TikTok error ${code}: ${detail}`);
   }
 }
 
@@ -117,9 +110,7 @@ export class TikTokApiClient {
    */
   buildUrl(path: string, query?: TikTokRequest["query"]): string {
     const normalized = path.replace(/^\/+/, "");
-    const url = new URL(
-      `${this.baseUrl}/open_api/${this.apiVersion}/${normalized}`,
-    );
+    const url = new URL(`${this.baseUrl}/open_api/${this.apiVersion}/${normalized}`);
 
     for (const [key, value] of Object.entries(query ?? {})) {
       if (value !== undefined) {

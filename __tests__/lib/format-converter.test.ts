@@ -27,15 +27,11 @@ describe("TikTokFormatConverter", () => {
   });
 
   it("strips markdown formatting for outbound text", () => {
-    expect(converter.renderPostable({ markdown: "**bold** and _italic_" })).toBe(
-      "bold and italic",
-    );
+    expect(converter.renderPostable({ markdown: "**bold** and _italic_" })).toBe("bold and italic");
   });
 
   it("flattens an AST postable", () => {
-    expect(converter.renderPostable({ ast: converter.toAst("from ast") })).toBe(
-      "from ast",
-    );
+    expect(converter.renderPostable({ ast: converter.toAst("from ast") })).toBe("from ast");
   });
 
   it("degrades a card to readable text instead of dropping it", () => {

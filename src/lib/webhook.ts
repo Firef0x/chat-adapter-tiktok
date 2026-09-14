@@ -46,9 +46,7 @@ export function parseSignatureHeader(header: string): ParsedSignature | null {
   return { timestamp, signature };
 }
 
-export type VerificationResult =
-  | { valid: true }
-  | { valid: false; reason: string };
+export type VerificationResult = { valid: true } | { valid: false; reason: string };
 
 export interface VerifyOptions {
   /** Raw `Tiktok-Signature` header value. */
@@ -100,10 +98,7 @@ export function verifyWebhookSignature(options: VerifyOptions): VerificationResu
 
   // timingSafeEqual throws on length mismatch, so check length first — and a
   // differing length is itself a mismatch.
-  if (
-    provided.length !== computed.length ||
-    !crypto.timingSafeEqual(provided, computed)
-  ) {
+  if (provided.length !== computed.length || !crypto.timingSafeEqual(provided, computed)) {
     return { valid: false, reason: "signature mismatch" };
   }
 

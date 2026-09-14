@@ -46,9 +46,7 @@ describe("mapTikTokError", () => {
   });
 
   it("keeps the request ID so failures can be traced with TikTok support", () => {
-    expect(mapTikTokError(TIKTOK_CODE.INVALID_PARAM, "bad", "req_9").message).toContain(
-      "req_9",
-    );
+    expect(mapTikTokError(TIKTOK_CODE.INVALID_PARAM, "bad", "req_9").message).toContain("req_9");
   });
 
   it("treats throttling as retryable and blocked messages as not", () => {
@@ -56,15 +54,11 @@ describe("mapTikTokError", () => {
     expect(mapTikTokError(TIKTOK_CODE.RATE_LIMITED, "slow down")).toBeInstanceOf(
       AdapterRateLimitError,
     );
-    expect(mapTikTokError(TIKTOK_CODE.MESSAGE_BLOCKED, "blocked")).toBeInstanceOf(
-      ValidationError,
-    );
+    expect(mapTikTokError(TIKTOK_CODE.MESSAGE_BLOCKED, "blocked")).toBeInstanceOf(ValidationError);
   });
 
   it("maps the remaining documented codes", () => {
-    expect(mapTikTokError(TIKTOK_CODE.NOT_FOUND, "gone")).toBeInstanceOf(
-      ResourceNotFoundError,
-    );
+    expect(mapTikTokError(TIKTOK_CODE.NOT_FOUND, "gone")).toBeInstanceOf(ResourceNotFoundError);
     expect(mapTikTokError(TIKTOK_CODE.UNSUPPORTED_FILE_TYPE, "nope")).toBeInstanceOf(
       ValidationError,
     );
@@ -116,9 +110,9 @@ describe("TikTokApiClient", () => {
     const fetchImpl = vi.fn(async () => envelope(0, { display_name: "Acme" }));
     const client = new TikTokApiClient({ tokens, fetchImpl: fetchImpl as never });
 
-    await expect(
-      client.request({ method: "GET", path: "business/get/" }),
-    ).resolves.toEqual({ display_name: "Acme" });
+    await expect(client.request({ method: "GET", path: "business/get/" })).resolves.toEqual({
+      display_name: "Acme",
+    });
   });
 
   it("treats a non-zero code on an HTTP 200 as a failure", async () => {
@@ -140,9 +134,9 @@ describe("TikTokApiClient", () => {
       .mockResolvedValueOnce(envelope(0, { retried: true }));
     const client = new TikTokApiClient({ tokens, fetchImpl: fetchImpl as never });
 
-    await expect(
-      client.request({ method: "GET", path: "business/get/" }),
-    ).resolves.toEqual({ retried: true });
+    await expect(client.request({ method: "GET", path: "business/get/" })).resolves.toEqual({
+      retried: true,
+    });
 
     expect(tokens.refreshAccessToken).toHaveBeenCalledTimes(1);
     const secondHeaders = fetchImpl.mock.calls[1]?.[1].headers as Record<string, string>;
@@ -155,9 +149,9 @@ describe("TikTokApiClient", () => {
     );
     const client = new TikTokApiClient({ tokens, fetchImpl: fetchImpl as never });
 
-    await expect(
-      client.request({ method: "GET", path: "business/get/" }),
-    ).rejects.toBeInstanceOf(AuthenticationError);
+    await expect(client.request({ method: "GET", path: "business/get/" })).rejects.toBeInstanceOf(
+      AuthenticationError,
+    );
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
@@ -167,9 +161,9 @@ describe("TikTokApiClient", () => {
     });
     const client = new TikTokApiClient({ tokens, fetchImpl: fetchImpl as never });
 
-    await expect(
-      client.request({ method: "GET", path: "business/get/" }),
-    ).rejects.toBeInstanceOf(NetworkError);
+    await expect(client.request({ method: "GET", path: "business/get/" })).rejects.toBeInstanceOf(
+      NetworkError,
+    );
   });
 
   it("wraps a non-JSON body as NetworkError rather than crashing", async () => {
@@ -181,8 +175,8 @@ describe("TikTokApiClient", () => {
     }));
     const client = new TikTokApiClient({ tokens, fetchImpl: fetchImpl as never });
 
-    await expect(
-      client.request({ method: "GET", path: "business/get/" }),
-    ).rejects.toBeInstanceOf(NetworkError);
+    await expect(client.request({ method: "GET", path: "business/get/" })).rejects.toBeInstanceOf(
+      NetworkError,
+    );
   });
 });

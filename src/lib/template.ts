@@ -47,10 +47,7 @@ export function cardToTemplate(card: CardElement): TikTokTemplatePayload | null 
     .filter((action) => action.type === "button")
     .filter((button) => !button.disabled);
 
-  if (
-    buttons.length < TEMPLATE_LIMITS.minButtons ||
-    buttons.length > TEMPLATE_LIMITS.maxButtons
-  ) {
+  if (buttons.length < TEMPLATE_LIMITS.minButtons || buttons.length > TEMPLATE_LIMITS.maxButtons) {
     return null;
   }
 

@@ -98,10 +98,34 @@ These come from the TikTok platform, not from this adapter:
 - **No comment webhook.** You cannot trigger a DM from a comment on an organic
   post.
 - **1:1 conversations only.** There are no group threads.
-- **Text only in this release.** Image attachments are planned for v0.2. Rich
-  content (cards, buttons, markdown) is flattened to readable plain text, and
-  inbound images, stickers, and videos arrive as a visible placeholder such as
+- **Text only in this release.** Image attachments are planned for v0.2.
+  Inbound images, stickers, and videos arrive as a visible placeholder such as
   `[image]` rather than as empty text.
+
+### Cards and buttons
+
+A card with a short question and one to three plain buttons is sent as a
+TikTok **Q&A button card**, which renders as real tappable buttons. When the
+user taps one, TikTok delivers their choice as a normal text message.
+
+Anything that does not fit that shape degrades to plain text rather than being
+dropped — more than three buttons, a button label over 20 characters, a
+question over 40, or a card carrying link buttons or select options:
+
+```
+Order status
+Shipped on Tuesday
+• Track my order
+• Talk to a human
+```
+
+The fallback costs interactivity, never information. Disabled buttons are left
+out either way, since TikTok cannot show a disabled state and an unselectable
+option is worse than an absent one. Inbound template messages are rendered the
+same way.
+
+Set `useTemplates: false` to always send plain text, if your account rejects
+template messages.
 - **Reactions, edits, and deletes are unsupported** by the platform API. Chat
   SDK requires these methods on every adapter, so they are present but throw
   `NotImplementedError` rather than failing silently.

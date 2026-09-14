@@ -1,12 +1,16 @@
-import { cardToFallbackText, extractCard } from "@chat-adapter/shared";
+import { extractCard } from "@chat-adapter/shared";
 import type { AdapterPostableMessage, FormattedContent } from "chat";
 import { markdownToPlainText, toPlainText } from "chat";
+
+import { cardToPlainText } from "./card-to-text.js";
 
 /**
  * Converts between Chat SDK content and TikTok's wire format.
  *
- * TikTok direct messages carry plain text and nothing else — no markdown, no
- * entities, no attachments on a text message. Everything richer has to
+ * This is the fallback path. A card that fits TikTok's Q&A button card is sent
+ * as a native template instead (see `template.ts`); everything else arrives
+ * here, where a TikTok message carries plain text and nothing else — no
+ * markdown, no entities, no attachments. Content richer than that has to
  * degrade to something a person can still read, rather than being dropped.
  */
 export class TikTokFormatConverter {
@@ -42,12 +46,7 @@ export class TikTokFormatConverter {
   renderPostable(message: AdapterPostableMessage): string {
     const card = extractCard(message);
     if (card) {
-      // `cardToFallbackText` iterates `children` unguarded. A card assembled
-      // by hand rather than through the JSX helpers can omit it, and a
-      // TypeError here would fail the send rather than degrade it.
-      return cardToFallbackText(
-        Array.isArray(card.children) ? card : { ...card, children: [] },
-      );
+      return cardToPlainText(card);
     }
 
     if (typeof message === "string") {

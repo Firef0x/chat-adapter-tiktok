@@ -50,6 +50,7 @@ import type {
   TikTokMessageContent,
   TikTokMessageListData,
   TikTokRawMessage,
+  TikTokReferralContent,
   TikTokRestMessage,
   TikTokSendMessageData,
   TikTokSendMessageRequest,
@@ -78,13 +79,6 @@ const REQUIRED_CREDENTIALS = [
 ] as const;
 
 /**
- * Convert a TikTok epoch-millisecond stamp to a Date.
- *
- * A missing or malformed value would otherwise produce an `Invalid Date`,
- * which throws no error and compares false against everything — silently
- * corrupting ordering downstream.
- */
-/**
  * The file extension of a URL's path, lowercased, or `null`.
  *
  * Query strings carry expiry parameters on TikTok's sticker URLs, so the path
@@ -100,6 +94,13 @@ function extensionFromUrl(url: string): string | null {
   }
 }
 
+/**
+ * Convert a TikTok epoch-millisecond stamp to a Date.
+ *
+ * A missing or malformed value would otherwise produce an `Invalid Date`,
+ * which throws no error and compares false against everything — silently
+ * corrupting ordering downstream.
+ */
 function toDate(timestamp: number | undefined): Date {
   return Number.isFinite(timestamp) ? new Date(timestamp as number) : new Date();
 }
@@ -178,6 +179,9 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       baseUrl: config.baseUrl,
       apiVersion: config.apiVersion,
       fetchImpl: config.fetchImpl,
+      maxRateLimitRetries: config.maxRateLimitRetries,
+      rateLimitRetryDelayMs: config.rateLimitRetryDelayMs,
+      sleepImpl: config.sleepImpl,
     });
   }
 
@@ -248,14 +252,6 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
   private async processEnvelope(rawBody: string, options?: WebhookOptions): Promise<void> {
     const envelope = JSON.parse(rawBody) as TikTokWebhookEnvelope;
 
-    // Only these two carry a usable message. `im_receive_msg_eu` is
-    // deliberately stripped by TikTok — no content, no conversation ID — so
-    // there is nothing to deliver.
-    if (envelope.event !== "im_receive_msg" && envelope.event !== "im_send_msg") {
-      this.logger.debug("Ignoring TikTok event", { event: envelope.event });
-      return;
-    }
-
     // One app URL receives webhooks for every authorized account, so an
     // envelope for a different business must be refused rather than processed
     // with this connection's credentials.
@@ -263,6 +259,21 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       this.logger.warn("Ignoring TikTok webhook for a different business", {
         event: envelope.event,
       });
+      return;
+    }
+
+    // A referral announces an arrival rather than a message: no message_id,
+    // no type, so it cannot travel the message path at all.
+    if (envelope.event === "im_referral_msg") {
+      await this.dispatchReferral(envelope);
+      return;
+    }
+
+    // Only these two carry a usable message. `im_receive_msg_eu` is
+    // deliberately stripped by TikTok — no content, no conversation ID — so
+    // there is nothing to deliver.
+    if (envelope.event !== "im_receive_msg" && envelope.event !== "im_send_msg") {
+      this.logger.debug("Ignoring TikTok event", { event: envelope.event });
       return;
     }
 
@@ -309,6 +320,50 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     }
 
     await this.chat.processMessage(this, threadId, async () => this.parseMessage(content), options);
+  }
+
+  /**
+   * Report how a user arrived, when they came from an ad or a tiktok.me link.
+   *
+   * Chat SDK has no event for attribution, and the payload carries no message,
+   * so this goes to the host's `onReferral` callback instead. A host that has
+   * not asked for it gets a debug line rather than silence, since the arrival
+   * is otherwise invisible until the user speaks.
+   */
+  private async dispatchReferral(envelope: TikTokWebhookEnvelope): Promise<void> {
+    const content = JSON.parse(envelope.content) as TikTokReferralContent;
+
+    if (!content.conversation_id || !content.referral) {
+      // The type declares both as present. Guarding rather than reaching
+      // through with `?.` keeps the declaration honest: a payload missing
+      // either is not a referral this can describe.
+      this.logger.debug("Ignoring an incomplete TikTok referral");
+      return;
+    }
+
+    if (!this.config.onReferral) {
+      this.logger.debug("A TikTok referral arrived but no onReferral is configured", {
+        source: content.referral.source,
+      });
+      return;
+    }
+
+    try {
+      await this.config.onReferral({
+        threadId: this.encodeThreadId({
+          businessId: this.config.businessId,
+          conversationId: content.conversation_id,
+        }),
+        businessId: this.config.businessId,
+        conversationId: content.conversation_id,
+        referral: content.referral,
+        raw: content,
+      });
+    } catch (error) {
+      // The host's own failure must not turn into a retried webhook, which
+      // would replay the same referral and fail the same way.
+      this.logger.error("The onReferral handler failed", { error });
+    }
   }
 
   /**

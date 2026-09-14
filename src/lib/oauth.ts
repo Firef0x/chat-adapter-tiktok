@@ -1,8 +1,8 @@
 import { AuthenticationError, NetworkError } from "@chat-adapter/shared";
 
-import type { TikTokApiEnvelope, TikTokTokenResponse, TikTokTokens } from "../types.js";
+import type { TikTokTokenResponse, TikTokTokens } from "../types.js";
 import { TIKTOK_CODE, TIKTOK_MESSAGING_SCOPES } from "../types.js";
-import { TIKTOK_API_HOST, TIKTOK_DEFAULT_API_VERSION } from "./api-client.js";
+import { fetchEnvelope, TIKTOK_API_HOST, TIKTOK_DEFAULT_API_VERSION } from "./api-client.js";
 import { ADAPTER_NAME } from "./thread-id.js";
 
 /** Where a user is sent to approve the connection. */
@@ -72,51 +72,23 @@ export async function exchangeAuthCode(options: ExchangeCodeOptions): Promise<Ti
   const base = (options.baseUrl ?? TIKTOK_API_HOST).replace(/\/+$/, "");
   const version = options.apiVersion ?? TIKTOK_DEFAULT_API_VERSION;
   const url = `${base}/open_api/${version}/tt_user/oauth2/token/`;
-  const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? (() => Date.now());
 
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      // The OAuth endpoints take credentials in the body and no auth header.
-      // The code field is `auth_code`, not `code` as most providers use.
-      body: JSON.stringify({
-        client_id: options.appId,
-        client_secret: options.appSecret,
-        grant_type: "authorization_code",
-        auth_code: options.authCode,
-        redirect_uri: options.redirectUri,
-      }),
-    });
-  } catch (error) {
-    throw new NetworkError(
-      ADAPTER_NAME,
-      "Token exchange request failed",
-      error instanceof Error ? error : undefined,
-    );
-  }
-
-  let envelope: TikTokApiEnvelope<TikTokTokenResponse>;
-  try {
-    envelope = (await response.json()) as TikTokApiEnvelope<TikTokTokenResponse>;
-  } catch (error) {
-    throw new NetworkError(
-      ADAPTER_NAME,
-      `Non-JSON response from the token endpoint (HTTP ${response.status})`,
-      error instanceof Error ? error : undefined,
-    );
-  }
-
-  // A non-numeric code means the body never reached the API layer, so it says
-  // nothing about whether the grant itself was valid.
-  if (typeof envelope?.code !== "number") {
-    throw new NetworkError(
-      ADAPTER_NAME,
-      `Unrecognized token-endpoint response (HTTP ${response.status})`,
-    );
-  }
+  const envelope = await fetchEnvelope<TikTokTokenResponse>({
+    url,
+    method: "POST",
+    // The OAuth endpoints take credentials in the body and no auth header.
+    // The code field is `auth_code`, not `code` as most providers use.
+    body: {
+      client_id: options.appId,
+      client_secret: options.appSecret,
+      grant_type: "authorization_code",
+      auth_code: options.authCode,
+      redirect_uri: options.redirectUri,
+    },
+    fetchImpl: options.fetchImpl,
+    operation: "the token exchange",
+  });
 
   if (envelope.code !== TIKTOK_CODE.OK) {
     // Throttling is worth another attempt; anything else means this code will

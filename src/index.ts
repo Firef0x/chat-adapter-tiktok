@@ -45,6 +45,12 @@ export {
   verifyWebhookSignature,
   type VerifyOptions,
 } from "./lib/webhook.js";
+export {
+  deleteWebhookConfig,
+  getWebhookConfig,
+  setWebhookConfig,
+  type WebhookConfigOptions,
+} from "./lib/webhook-config.js";
 export { TIKTOK_CODE, TIKTOK_MESSAGING_SCOPES } from "./types.js";
 export type {
   TikTokAdapterConfig,
@@ -74,8 +80,11 @@ export type {
   TikTokThreadId,
   TikTokTokenResponse,
   TikTokTokens,
+  TikTokReferralEvent,
+  TikTokWebhookConfig,
   TikTokWebhookContent,
   TikTokWebhookEnvelope,
+  TikTokWebhookEventType,
   TikTokWebhookEventName,
   TikTokWebhookMessageType,
   TikTokWebhookRole,

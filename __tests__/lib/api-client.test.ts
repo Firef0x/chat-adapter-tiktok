@@ -166,6 +166,34 @@ describe("TikTokApiClient", () => {
     );
   });
 
+  it("rejects a body whose code is not a number", async () => {
+    // Valid JSON from a gateway still says nothing about the request, so it
+    // must not be unwrapped as though it came from the API.
+    const fetchImpl = vi.fn(async () => ({
+      status: 200,
+      json: async () => ({ error: "upstream unavailable" }),
+    }));
+    const client = new TikTokApiClient({ tokens, fetchImpl: fetchImpl as never });
+
+    await expect(client.request({ method: "GET", path: "business/get/" })).rejects.toBeInstanceOf(
+      NetworkError,
+    );
+  });
+
+  it("clamps a non-numeric retry setting instead of looping forever", async () => {
+    // `?? 2` lets NaN through, and `attempt >= NaN` is never true.
+    const fetchImpl = vi.fn(async () => envelope(TIKTOK_CODE.RATE_LIMITED, {}, "slow down"));
+    const client = new TikTokApiClient({
+      tokens,
+      fetchImpl: fetchImpl as never,
+      maxRateLimitRetries: Number.NaN,
+      sleepImpl: async () => {},
+    });
+
+    await expect(client.request({ method: "GET", path: "business/get/" })).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(3); // the default bound, not unbounded
+  });
+
   it("wraps a non-JSON body as NetworkError rather than crashing", async () => {
     const fetchImpl = vi.fn(async () => ({
       status: 502,
@@ -178,5 +206,103 @@ describe("TikTokApiClient", () => {
     await expect(client.request({ method: "GET", path: "business/get/" })).rejects.toBeInstanceOf(
       NetworkError,
     );
+  });
+});
+
+describe("rate-limit backoff", () => {
+  function clientWithSleep(fetchImpl: unknown, overrides: Record<string, unknown> = {}) {
+    const slept: number[] = [];
+    const client = new TikTokApiClient({
+      tokens: tokenProvider(),
+      fetchImpl: fetchImpl as never,
+      sleepImpl: async (ms: number) => {
+        slept.push(ms);
+      },
+      ...overrides,
+    });
+    return { client, slept };
+  }
+
+  it("retries a throttled request and returns the eventual success", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(envelope(TIKTOK_CODE.RATE_LIMITED, {}, "slow down"))
+      .mockResolvedValueOnce(envelope(0, { ok: true }));
+    const { client, slept } = clientWithSleep(fetchImpl);
+
+    await expect(client.request({ method: "GET", path: "business/get/" })).resolves.toEqual({
+      ok: true,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(slept).toEqual([1000]);
+  });
+
+  it("backs off exponentially and gives up after the configured attempts", async () => {
+    // TikTok's own recovery for a per-minute overage is five minutes, so this
+    // cannot rescue a sustained overage — only a brief burst.
+    const fetchImpl = vi.fn(async () => envelope(TIKTOK_CODE.RATE_LIMITED, {}, "slow down"));
+    const { client, slept } = clientWithSleep(fetchImpl);
+
+    await expect(client.request({ method: "GET", path: "business/get/" })).rejects.toBeInstanceOf(
+      AdapterRateLimitError,
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(3); // initial + 2 retries
+    expect(slept).toEqual([1000, 2000]);
+  });
+
+  it("does not retry when disabled", async () => {
+    const fetchImpl = vi.fn(async () => envelope(TIKTOK_CODE.RATE_LIMITED, {}, "slow down"));
+    const { client, slept } = clientWithSleep(fetchImpl, { maxRateLimitRetries: 0 });
+
+    await expect(client.request({ method: "GET", path: "business/get/" })).rejects.toBeInstanceOf(
+      AdapterRateLimitError,
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(slept).toEqual([]);
+  });
+
+  it("honours a custom initial delay", async () => {
+    const fetchImpl = vi.fn(async () => envelope(TIKTOK_CODE.RATE_LIMITED, {}, "slow down"));
+    const { client, slept } = clientWithSleep(fetchImpl, { rateLimitRetryDelayMs: 50 });
+
+    await expect(client.request({ method: "GET", path: "business/get/" })).rejects.toThrow();
+    expect(slept).toEqual([50, 100]);
+  });
+
+  it("does not retry a failure that is not throttling", async () => {
+    // Retrying a validation error wastes quota and can never succeed.
+    const fetchImpl = vi.fn(async () => envelope(TIKTOK_CODE.INVALID_PARAM, {}, "bad"));
+    const { client, slept } = clientWithSleep(fetchImpl);
+
+    await expect(client.request({ method: "GET", path: "business/get/" })).rejects.toBeInstanceOf(
+      ValidationError,
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(slept).toEqual([]);
+  });
+
+  it("refreshes at most once per attempt, not once per send", async () => {
+    // Each refresh rotates the refresh token, so the count is not free — and
+    // asserting only the final value would pass even if every send refreshed.
+    const tokens = tokenProvider();
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(envelope(TIKTOK_CODE.INVALID_ACCESS_TOKEN, {}, "bad token"))
+      .mockResolvedValueOnce(envelope(TIKTOK_CODE.RATE_LIMITED, {}, "slow down"))
+      .mockResolvedValueOnce(envelope(0, { ok: true }));
+    const client = new TikTokApiClient({
+      tokens,
+      fetchImpl: fetchImpl as never,
+      sleepImpl: async () => {},
+    });
+
+    await expect(client.request({ method: "GET", path: "business/get/" })).resolves.toEqual({
+      ok: true,
+    });
+
+    // One rejection happened, so exactly one refresh — the second attempt saw
+    // throttling, not a token problem.
+    expect(tokens.refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 });

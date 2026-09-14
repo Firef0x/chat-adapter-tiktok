@@ -88,13 +88,36 @@ fan-out. The default page size is small for the same reason, and the fetches
 run sequentially because TikTok rate-limits per app, so a parallel burst would
 trip `40100` on exactly the pages large enough to matter.
 
-Three auth schemes coexist, which the HTTP client must keep straight:
+Four auth schemes coexist, which the HTTP layer must keep straight:
 
 - Messaging endpoints use a custom `Access-Token: <token>` header.
 - OAuth endpoints use no header; credentials go in the JSON body, and the
   authorize leg names the app `client_key` while the token leg names it
   `client_id`.
+- Webhook-configuration endpoints are app-level: `app_id` and `secret` travel
+  as ordinary parameters, with no token at all, and one configuration covers
+  every business that has authorized the app.
 - Media download URLs use `x-user: <token>` instead of `Access-Token`.
+
+Because three of those four cannot use the authenticated client, the shared
+hazards — transport failure, a gateway returning HTML, and a failure reported
+as HTTP 200 with a non-zero code — are handled once in `fetchEnvelope`. The
+authenticated client routes through it too, passing the `Access-Token` header
+as an option, so there is one transport rather than one per auth scheme.
+
+The webhook read is a `GET`, which puts the app secret in a query string where
+proxies and access logs capture it. That is TikTok's shape, not a choice, but
+it is worth knowing before calling it from somewhere that logs outbound URLs.
+
+### Retrying a throttled request
+
+Throttling is reported as code `40100`, and the client retries it a bounded
+number of times with an exponential backoff. The delay is deliberately short:
+TikTok's documented recovery is five minutes for a per-minute overage and
+midnight UTC for a per-day one, so no realistic in-request wait can rescue a
+sustained overage — and blocking a webhook handler for minutes would be worse
+than failing. What the retry does cover is a brief burst. Only `40100` is
+retried; a validation error would fail identically every time.
 
 Two shape constraints worth noting early, because they limit what the adapter
 can offer:
@@ -142,6 +165,7 @@ src/
     card-to-text.ts     card flattening, buttons included
     template.ts         card -> native Q&A button card, or null
     oauth.ts            authorize URL and authorization-code exchange
+    webhook-config.ts   app-level callback registration
     media.ts            image upload/download and the capability probe
 __tests__/              mirrors src/, all HTTP mocked
 ```
@@ -214,7 +238,21 @@ be swallowed: a message the business sent from the TikTok app carries source
 
 Webhooks for every authorized account arrive at one app URL, so an envelope
 whose `user_openid` is not the configured `business_id` is refused rather than
-processed with this connection's credentials.
+processed with this connection's credentials. That check runs before any event
+is routed, including referrals — a referral is attribution data, and reporting
+another account's under this one's `businessId` would be worse than dropping
+it.
+
+### Referral attribution
+
+A Click-to-Message ad or tiktok.me link produces `im_referral_msg`, which
+carries no `message_id` and no `type` — it announces an arrival rather than a
+message, so it cannot travel the message path at all. Chat SDK has no event
+for attribution either, so it goes to an `onReferral` callback. A host that
+has not configured one gets a debug line rather than silence, since the
+arrival is otherwise invisible until the user speaks, and a handler that
+throws is logged rather than surfaced: returning non-2xx would make TikTok
+replay a referral that would fail identically.
 
 ### Reactions, quoting, and stickers
 

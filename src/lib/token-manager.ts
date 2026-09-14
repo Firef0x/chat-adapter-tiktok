@@ -1,4 +1,4 @@
-import { AuthenticationError, NetworkError } from "@chat-adapter/shared";
+import { AuthenticationError } from "@chat-adapter/shared";
 import type { Logger } from "chat";
 import { ConsoleLogger } from "chat";
 
@@ -6,6 +6,7 @@ import type { TikTokApiEnvelope, TikTokTokenResponse, TikTokTokens } from "../ty
 import { TIKTOK_CODE } from "../types.js";
 import {
   type AccessTokenProvider,
+  fetchEnvelope,
   mapTikTokError,
   TIKTOK_API_HOST,
   TIKTOK_DEFAULT_API_VERSION,
@@ -66,12 +67,10 @@ export class TikTokTokenManager implements AccessTokenProvider {
 
   private readonly options: TokenManagerOptions;
   private readonly now: () => number;
-  private readonly fetchImpl: typeof fetch;
 
   constructor(options: TokenManagerOptions) {
     this.options = options;
     this.now = options.now ?? (() => Date.now());
-    this.fetchImpl = options.fetchImpl ?? fetch;
 
     this.accessToken = options.accessToken;
     this.refreshToken = options.refreshToken;
@@ -139,50 +138,18 @@ export class TikTokTokenManager implements AccessTokenProvider {
 
     // The OAuth endpoints authenticate with credentials in the body and must
     // not carry an Access-Token header.
-    let response: Response;
-    try {
-      response = await this.fetchImpl(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          client_id: this.options.appId,
-          client_secret: this.options.appSecret,
-          grant_type: "refresh_token",
-          refresh_token: this.refreshToken,
-        }),
-      });
-    } catch (error) {
-      // A transport failure must stay retryable. Letting the raw error escape
-      // would bypass the caller's retry classification entirely.
-      throw new NetworkError(
-        ADAPTER_NAME,
-        "Token refresh request failed",
-        error instanceof Error ? error : undefined,
-      );
-    }
-
-    let envelope: TikTokApiEnvelope<TikTokTokenResponse>;
-    try {
-      envelope = (await response.json()) as TikTokApiEnvelope<TikTokTokenResponse>;
-    } catch (error) {
-      // Typically a CDN or gateway error page. Reporting it as a parse error
-      // would read as a bug in this library rather than a transient fault.
-      throw new NetworkError(
-        ADAPTER_NAME,
-        `Non-JSON response from the token endpoint (HTTP ${response.status})`,
-        error instanceof Error ? error : undefined,
-      );
-    }
-
-    // A non-numeric code means the body never came from the API layer, so it
-    // says nothing about the grant. Demanding re-authorization here would send
-    // an operator through a manual OAuth flow over a five-minute outage.
-    if (typeof envelope?.code !== "number") {
-      throw new NetworkError(
-        ADAPTER_NAME,
-        `Unrecognized token-endpoint response (HTTP ${response.status})`,
-      );
-    }
+    const envelope = await fetchEnvelope<TikTokTokenResponse>({
+      url,
+      method: "POST",
+      body: {
+        client_id: this.options.appId,
+        client_secret: this.options.appSecret,
+        grant_type: "refresh_token",
+        refresh_token: this.refreshToken,
+      },
+      fetchImpl: this.options.fetchImpl,
+      operation: "the token refresh",
+    });
 
     if (envelope.code !== TIKTOK_CODE.OK) {
       throw this.refreshFailure(envelope);

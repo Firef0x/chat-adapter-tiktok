@@ -67,6 +67,28 @@ export interface TikTokAdapterConfig {
    * token rotates, an unsaved one is unrecoverable.
    */
   onTokenRefresh?: (tokens: TikTokTokens) => void | Promise<void>;
+  /**
+   * Called when a user arrives through a Click-to-Message ad or a tiktok.me
+   * link, before they have said anything.
+   *
+   * This is the only place the attribution appears — TikTok sends it as its
+   * own event carrying no message, so it is not reachable from the message
+   * stream. It is delivered here rather than through Chat SDK because the SDK
+   * has no event for it.
+   */
+  onReferral?: (event: TikTokReferralEvent) => void | Promise<void>;
+  /**
+   * How many times to retry a request TikTok throttles. Defaults to 2;
+   * `0` disables retrying.
+   */
+  maxRateLimitRetries?: number;
+  /**
+   * Delay before the first throttled retry, in milliseconds, doubling each
+   * attempt. Defaults to 1000.
+   */
+  rateLimitRetryDelayMs?: number;
+  /** Injectable delay for the throttled-retry backoff. Intended for testing. */
+  sleepImpl?: (ms: number) => Promise<void>;
   /** Display name for the bot. Defaults to `"tiktok-bot"`. */
   userName?: string;
   /**
@@ -89,6 +111,35 @@ export interface TikTokAdapterConfig {
    */
   signatureToleranceSeconds?: number;
   logger?: Logger;
+}
+
+/**
+ * Webhook event types an app can subscribe to.
+ *
+ * `DIRECT_MESSAGE` is the only value TikTok documents. It is the subscription
+ * category, not the per-delivery `event` name — those are the `im_*` values in
+ * {@link TikTokWebhookEventName}.
+ */
+export type TikTokWebhookEventType = "DIRECT_MESSAGE";
+
+/** An app's webhook registration. */
+export interface TikTokWebhookConfig {
+  appId: string;
+  eventType: TikTokWebhookEventType;
+  callbackUrl: string;
+}
+
+/** A user arriving through an ad or a tiktok.me link. */
+export interface TikTokReferralEvent {
+  /** The conversation the user landed in, as a Chat SDK thread ID. */
+  threadId: string;
+  /** The business account that received them. */
+  businessId: string;
+  conversationId: string;
+  /** Where they came from, verbatim from TikTok. */
+  referral: TikTokReferralContent["referral"];
+  /** The full parsed payload, for anything not surfaced above. */
+  raw: TikTokReferralContent;
 }
 
 /**

@@ -845,6 +845,220 @@ describe("TikTokAdapter", () => {
     });
   });
 
+  describe("rate-limit configuration", () => {
+    it("passes the retry settings through to the API client", async () => {
+      // These were declared on the adapter config but never forwarded, so
+      // configuring them silently did nothing.
+      const slept: number[] = [];
+      const throttledThenOk = vi
+        .fn()
+        .mockResolvedValueOnce(errorResponse(TIKTOK_CODE.RATE_LIMITED, "slow down"))
+        .mockResolvedValueOnce(okResponse({ message: { message_id: "msg_1" } }));
+
+      const local = new TikTokAdapter({
+        appId: "app_1",
+        appSecret: APP_SECRET,
+        businessId: BUSINESS_ID,
+        accessToken: "access_1",
+        refreshToken: "refresh_1",
+        accessTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        rateLimitRetryDelayMs: 42,
+        fetchImpl: throttledThenOk as never,
+        sleepImpl: async (ms: number) => {
+          slept.push(ms);
+        },
+      });
+
+      await local.postMessage(
+        local.encodeThreadId({ businessId: BUSINESS_ID, conversationId: CONVERSATION_ID }),
+        "hi",
+      );
+
+      expect(slept).toEqual([42]);
+      expect(throttledThenOk).toHaveBeenCalledTimes(2);
+    });
+
+    it("honours maxRateLimitRetries of 0", async () => {
+      const slept: number[] = [];
+      const alwaysThrottled = vi.fn(async () =>
+        errorResponse(TIKTOK_CODE.RATE_LIMITED, "slow down"),
+      );
+
+      const local = new TikTokAdapter({
+        appId: "app_1",
+        appSecret: APP_SECRET,
+        businessId: BUSINESS_ID,
+        accessToken: "access_1",
+        refreshToken: "refresh_1",
+        accessTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        maxRateLimitRetries: 0,
+        fetchImpl: alwaysThrottled as never,
+        sleepImpl: async (ms: number) => {
+          slept.push(ms);
+        },
+      });
+
+      await expect(
+        local.postMessage(
+          local.encodeThreadId({ businessId: BUSINESS_ID, conversationId: CONVERSATION_ID }),
+          "hi",
+        ),
+      ).rejects.toThrow();
+      expect(alwaysThrottled).toHaveBeenCalledTimes(1);
+      expect(slept).toEqual([]);
+    });
+  });
+
+  describe("referral attribution", () => {
+    const referralContent = {
+      from: "someuser",
+      to: "acmebrand",
+      unique_identifier: USER_ID,
+      from_user: { id: USER_ID, role: "personal_account" },
+      to_user: { id: BUSINESS_ID, role: "business_account" },
+      conversation_id: CONVERSATION_ID,
+      timestamp: 1_700_000_000_000,
+      referral: {
+        source: "ad",
+        ad: {
+          advertiser_id: "adv_1",
+          ad_id: "ad_1",
+          timestamp: 1_700_000_000_000,
+          ad_name: "Spring sale",
+          embed_url: "https://tiktok.com/v/1",
+          message_material_id: "mat_1",
+        },
+      },
+    };
+
+    function buildWith(onReferral?: (event: unknown) => void) {
+      const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+      const local = new TikTokAdapter({
+        appId: "app_1",
+        appSecret: APP_SECRET,
+        businessId: BUSINESS_ID,
+        accessToken: "access_1",
+        refreshToken: "refresh_1",
+        accessTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        onReferral: onReferral as never,
+        fetchImpl: vi.fn() as never,
+      });
+      return { local, logger };
+    }
+
+    it("reports which ad or link brought the user in", async () => {
+      // The attribution appears nowhere else: the event carries no message, so
+      // it is unreachable from the message stream.
+      const seen: Array<Record<string, unknown>> = [];
+      const { local, logger } = buildWith((event) => {
+        seen.push(event as Record<string, unknown>);
+      });
+      await local.initialize({ getLogger: () => logger } as never);
+
+      const response = await local.handleWebhook(
+        webhookRequest("im_referral_msg", referralContent),
+      );
+
+      expect(response.status).toBe(200);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({
+        businessId: BUSINESS_ID,
+        conversationId: CONVERSATION_ID,
+        threadId: local.encodeThreadId({
+          businessId: BUSINESS_ID,
+          conversationId: CONVERSATION_ID,
+        }),
+      });
+      const referral = seen[0]?.referral as { ad?: { ad_id?: string } } | undefined;
+      expect(referral?.ad?.ad_id).toBe("ad_1");
+    });
+
+    it("logs rather than failing when no handler is configured", async () => {
+      const { local, logger } = buildWith(undefined);
+      await local.initialize({ getLogger: () => logger } as never);
+
+      const response = await local.handleWebhook(
+        webhookRequest("im_referral_msg", referralContent),
+      );
+
+      expect(response.status).toBe(200);
+      // The specific message, not merely "some debug line" — the fall-through
+      // path for an unhandled event also logs at debug, so a looser assertion
+      // would pass with the whole feature deleted.
+      expect(logger.debug).toHaveBeenCalledWith(
+        "A TikTok referral arrived but no onReferral is configured",
+        expect.anything(),
+      );
+    });
+
+    it("does not turn a failing handler into a retried webhook", async () => {
+      // Returning non-2xx would replay the same referral, failing identically.
+      const { local, logger } = buildWith(() => {
+        throw new Error("handler blew up");
+      });
+      await local.initialize({ getLogger: () => logger } as never);
+
+      const response = await local.handleWebhook(
+        webhookRequest("im_referral_msg", referralContent),
+      );
+
+      expect(response.status).toBe(200);
+      expect(logger.error).toHaveBeenCalled();
+    });
+
+    it.each([
+      ["no conversation", { conversation_id: "" }],
+      ["no referral data", { referral: undefined }],
+    ])("ignores an incomplete referral (%s)", async (_label, overrides) => {
+      const seen: unknown[] = [];
+      const { local, logger } = buildWith((event) => seen.push(event));
+      await local.initialize({ getLogger: () => logger } as never);
+
+      await local.handleWebhook(
+        webhookRequest("im_referral_msg", { ...referralContent, ...overrides }),
+      );
+
+      expect(seen).toHaveLength(0);
+      expect(logger.debug).toHaveBeenCalledWith("Ignoring an incomplete TikTok referral");
+    });
+
+    it("refuses a referral addressed to a different business", async () => {
+      // Otherwise another account's attribution would be reported as this
+      // account's, stamped with this adapter's businessId.
+      const seen: unknown[] = [];
+      const { local, logger } = buildWith((event) => seen.push(event));
+      await local.initialize({ getLogger: () => logger } as never);
+
+      const body = JSON.stringify({
+        client_key: "app_1",
+        event: "im_referral_msg",
+        create_time: Math.floor(Date.now() / 1000),
+        user_openid: "SOMEONE_ELSES_BUSINESS",
+        content: JSON.stringify(referralContent),
+      });
+      const request = new Request("https://example.com/webhooks/tiktok", {
+        method: "POST",
+        headers: {
+          "tiktok-signature": signWebhookBody(body, APP_SECRET, Math.floor(Date.now() / 1000)),
+        },
+        body,
+      });
+
+      expect((await local.handleWebhook(request)).status).toBe(200);
+      expect(seen).toHaveLength(0);
+      expect(logger.warn).toHaveBeenCalled();
+    });
+
+    it("does not deliver a referral as a message", async () => {
+      const { chat, processed } = attachChat();
+      await adapter.initialize(chat as never);
+
+      await adapter.handleWebhook(webhookRequest("im_referral_msg", referralContent));
+
+      expect(processed).toHaveLength(0);
+    });
+  });
+
   describe("inbound reactions", () => {
     function reactionContent(entries: unknown[]) {
       return messageContent({

@@ -88,10 +88,57 @@ surfacing later as an opaque API rejection.
 | `onTokenRefresh` | `(tokens) => void \| Promise<void>` | — | Called with rotated credentials. Persist them |
 | `useTemplates` | `boolean` | `true` | Send fitting cards as native Q&A button cards. Set `false` to always send plain text |
 | `userName` | `string` | `"tiktok-bot"` | Display name for the bot |
+| `onReferral` | `(event) => void \| Promise<void>` | — | Called when a user arrives via an ad or tiktok.me link |
+| `maxRateLimitRetries` | `number` | `2` | Retries for a throttled request. `0` disables |
+| `rateLimitRetryDelayMs` | `number` | `1000` | First retry delay, doubling each attempt |
 | `signatureToleranceSeconds` | `number` | `5` | Permitted webhook timestamp drift. This is what prevents replay |
 | `apiVersion` | `string` | `"v1.3"` | API version segment |
 | `baseUrl` | `string` | TikTok's host | Override the API host. Intended for testing |
 | `logger` | `Logger` | Chat SDK's | Logger override |
+
+## Webhook configuration
+
+Register the callback URL programmatically instead of clicking through the
+developer portal:
+
+```typescript
+import { getWebhookConfig, setWebhookConfig } from "chat-adapter-tiktok";
+
+await setWebhookConfig({
+  appId: process.env.TIKTOK_APP_ID,
+  appSecret: process.env.TIKTOK_APP_SECRET,
+  callbackUrl: "https://example.com/webhooks/tiktok",
+});
+
+// `null` when nothing is configured yet.
+const current = await getWebhookConfig({ appId, appSecret });
+```
+
+These are **app-level**: they authenticate with the app's own ID and secret
+rather than an access token, and one configuration covers every business that
+has authorized the app — there is nothing to repeat per account.
+`deleteWebhookConfig()` removes it.
+
+One caution: TikTok documents the read as a `GET`, so `getWebhookConfig()` puts
+the app secret in the query string, where proxies and access logs record it in
+a way request bodies are not. Prefer running it from somewhere that does not
+log outbound URLs.
+
+## Referral attribution
+
+When a user arrives through a Click-to-Message ad or a tiktok.me link, TikTok
+sends a separate event carrying no message. It is therefore invisible to the
+message stream, and the SDK has no event for it, so it is delivered to a
+callback:
+
+```typescript
+createTikTokAdapter({
+  // ...credentials
+  onReferral: async ({ threadId, referral }) => {
+    await attributeConversation(threadId, referral.ad?.ad_id ?? referral.short_link?.ref);
+  },
+});
+```
 
 ## Platform setup
 
@@ -163,6 +210,9 @@ asymmetry for you.
 | OAuth | ✅ | `buildAuthorizeUrl()` and `exchangeAuthCode()`, plus automatic refresh |
 | Button taps | ✅ | Delivered as messages; `getButtonTapId()` recovers the button |
 | Quoted replies | ✅ | `reply()`, text only — TikTok's constraint |
+| Webhook configuration | ✅ | Register, read, and remove the callback URL programmatically |
+| Referral attribution | ✅ | `onReferral` reports the ad or link that started a conversation |
+| Rate-limit backoff | ✅ | Bounded retry on TikTok's `40100` |
 | Stickers and emoji | ✅ | Received as attachments carrying their URL |
 | Images | ✅ | Send and receive, subject to TikTok's regional gating |
 | Video and other media | ⚠️ | Received as a downloadable attachment; TikTok cannot send them |

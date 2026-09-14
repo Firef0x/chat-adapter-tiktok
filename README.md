@@ -186,12 +186,29 @@ const adapter = createTikTokAdapter({
 The authorization code is **single-use and expires after ten minutes**, so
 exchange it on the callback rather than queueing the work.
 
+Check at setup that the grant actually carries the messaging scopes — a grant
+can be valid without them, and the first symptom otherwise is a permission
+error on a send:
+
+```typescript
+import { getTokenInfo, missingMessagingScopes } from "chat-adapter-tiktok";
+
+const info = await getTokenInfo({ appId, accessToken: tokens.accessToken });
+const missing = missingMessagingScopes(info.scopes);
+if (missing.length > 0) {
+  throw new Error(`TikTok grant is missing: ${missing.join(", ")}`);
+}
+```
+
+`revokeAccessToken({ appId, appSecret, accessToken })` disconnects an account.
+
+TikTok names the application three different ways across these endpoints —
+`client_key` on the authorize URL, `client_id` on the token and revoke
+endpoints, and `app_id` on token inspection and webhook configuration. The
+helpers handle that; it is worth knowing if you ever call the API directly.
+
 `businessId` comes from the response's `open_id` — the same value under a
 different name, and the one every messaging call needs.
-
-Note TikTok names the app `client_key` on the authorize URL but `client_id` on
-the token endpoints; `buildAuthorizeUrl` and `exchangeAuthCode` handle that
-asymmetry for you.
 
 ## Features
 
@@ -207,9 +224,10 @@ asymmetry for you.
 | Message history | ⚠️ | The 20 most recent messages; TikTok offers no pagination |
 | Listing conversations | ✅ | `listConversations()` is cheap; `listThreads()` costs one request per conversation |
 | Channel info | ✅ | `fetchChannelInfo()` returns the business account's profile |
-| OAuth | ✅ | `buildAuthorizeUrl()` and `exchangeAuthCode()`, plus automatic refresh |
+| OAuth | ✅ | Authorize, exchange, refresh, revoke, and scope inspection |
 | Button taps | ✅ | Delivered as messages; `getButtonTapId()` recovers the button |
 | Quoted replies | ✅ | `reply()`, text only — TikTok's constraint |
+| Sharing your own posts | ✅ | `sharePost()`, by post ID — TikTok allows only your own |
 | Webhook configuration | ✅ | Register, read, and remove the callback URL programmatically |
 | Referral attribution | ✅ | `onReferral` reports the ad or link that started a conversation |
 | Rate-limit backoff | ✅ | Bounded retry on TikTok's `40100` |
@@ -254,6 +272,19 @@ download URL takes a separate request, and it expires after 24 hours — so
 ```typescript
 const bytes = await message.attachments[0]?.fetchData?.();
 ```
+
+### Sharing a post
+
+`sharePost()` sends one of the account's own posts into a conversation. TikTok
+takes the post's ID rather than a URL, and allows sharing only posts the
+account itself published:
+
+```typescript
+await adapter.sharePost(threadId, "7412345678901234567");
+```
+
+A shared post is its own message type and cannot carry a caption, so send any
+accompanying text as a separate message.
 
 ### Reactions and stickers
 

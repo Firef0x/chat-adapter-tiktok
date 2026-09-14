@@ -69,6 +69,8 @@ a trailing slash**; omitting it produces a 404.
 |---|---|---|
 | Exchange auth code | POST | `/tt_user/oauth2/token/` |
 | Refresh token | POST | `/tt_user/oauth2/refresh_token/` |
+| Revoke token | POST | `/tt_user/oauth2/revoke/` |
+| Inspect token scopes | POST | `/tt_user/token_info/get/` |
 | Send message | POST | `/business/message/send/` |
 | List conversations | GET | `/business/message/conversation/list/` |
 | List messages | GET | `/business/message/content/list/` |
@@ -87,6 +89,13 @@ listing, and `listThreads` for hosts that need the SDK shape and accept the
 fan-out. The default page size is small for the same reason, and the fetches
 run sequentially because TikTok rate-limits per app, so a parallel burst would
 trip `40100` on exactly the pages large enough to matter.
+
+TikTok names the application **three different ways** across these endpoints:
+`client_key` on the authorize URL, `client_id` on the token, refresh, and
+revoke endpoints, and `app_id` on token inspection and webhook configuration.
+Token inspection additionally takes no secret at all — the access token alone
+identifies the grant. Using the wrong name fails with an unhelpful error, so
+each helper pins the right one rather than sharing a generic credential shape.
 
 Four auth schemes coexist, which the HTTP layer must keep straight:
 
@@ -422,6 +431,12 @@ Steps are numbered as in the parent investigation.
 | 5 | `TikTokAdapter` class | Done |
 | 6 | Format converter | Done, including native Q&A button cards |
 | 7 | README, publish, directory listing | README done; publishing and the directory listing pending |
+
+Beyond the original plan, the adapter now also covers conversation listing,
+account profile, images, native Q&A button cards, quoted replies, inbound
+reactions, sticker and emoji attachments, post sharing, webhook configuration,
+referral attribution, throttle backoff, and the full OAuth lifecycle including
+revocation and scope inspection.
 
 Steps 2–6 have no dependency on step 1. They produce a complete, tested package
 whose only unverified surface is wire-format fidelity.

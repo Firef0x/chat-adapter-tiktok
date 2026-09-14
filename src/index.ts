@@ -13,6 +13,13 @@ export {
   buildAuthorizeUrl,
   type ExchangeCodeOptions,
   exchangeAuthCode,
+  getTokenInfo,
+  missingMessagingScopes,
+  revokeAccessToken,
+  type RevokeTokenOptions,
+  splitScopes,
+  type TikTokTokenInfo,
+  type TokenInfoOptions,
   TIKTOK_AUTHORIZE_URL,
 } from "./lib/oauth.js";
 export { TikTokFormatConverter } from "./lib/format-converter.js";

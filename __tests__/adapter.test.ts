@@ -845,6 +845,68 @@ describe("TikTokAdapter", () => {
     });
   });
 
+  describe("sharePost", () => {
+    function threadFor(local: TikTokAdapter) {
+      return local.encodeThreadId({
+        businessId: BUSINESS_ID,
+        conversationId: CONVERSATION_ID,
+      });
+    }
+
+    it("sends the post by item_id, not a URL", async () => {
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_share" } }));
+      const { adapter: local } = build(sendFetch);
+
+      const result = await local.sharePost(threadFor(local), "item_1");
+
+      expect(result.id).toBe("msg_share");
+      const body = JSON.parse((sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
+      expect(body).toMatchObject({
+        message_type: "SHARE_POST",
+        share_post: { item_id: "item_1" },
+        recipient: CONVERSATION_ID,
+      });
+      expect(body.text).toBeUndefined();
+    });
+
+    it("records the share so its echo is recognized", async () => {
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_share" } }));
+      const { adapter: local } = build(sendFetch);
+
+      await local.sharePost(threadFor(local), "item_1");
+      const echo = local.parseMessage(
+        messageContent({
+          message_id: "msg_share",
+          from_user: { id: BUSINESS_ID, role: "business_account" },
+        }),
+      );
+
+      expect(echo.author.isMe).toBe(true);
+    });
+
+    it.each([
+      ["empty", ""],
+      ["whitespace only", "   "],
+    ])("rejects a %s post ID before calling the API", async (_label, itemId) => {
+      // The sibling send paths use `.trim()` for their emptiness checks, so
+      // this one must too or a blank ID reaches TikTok.
+      const sendFetch = vi.fn();
+      const { adapter: local } = build(sendFetch);
+
+      await expect(local.sharePost(threadFor(local), itemId)).rejects.toBeInstanceOf(
+        ValidationError,
+      );
+      expect(sendFetch).not.toHaveBeenCalled();
+    });
+
+    it("fails a share that returns no message_id", async () => {
+      const sendFetch = vi.fn(async () => okResponse({ message: {} }));
+      const { adapter: local } = build(sendFetch);
+
+      await expect(local.sharePost(threadFor(local), "item_1")).rejects.toThrow(/no message_id/);
+    });
+  });
+
   describe("rate-limit configuration", () => {
     it("passes the retry settings through to the API client", async () => {
       // These were declared on the adapter config but never forwarded, so

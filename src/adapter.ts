@@ -776,6 +776,33 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
   }
 
   /**
+   * Share one of the business account's own posts into a conversation.
+   *
+   * TikTok allows sharing only posts the account itself published, and takes
+   * the post's `item_id` rather than a URL. There is no Chat SDK concept this
+   * maps onto, so it is exposed as its own method rather than squeezed into a
+   * postable.
+   *
+   * A shared post is its own message type, so it cannot carry a caption —
+   * send text separately if you need one.
+   */
+  async sharePost(threadId: string, itemId: string): Promise<RawMessage<TikTokRawMessage>> {
+    const { conversationId } = this.decodeThreadId(threadId);
+
+    if (!itemId.trim()) {
+      throw new ValidationError(ADAPTER_NAME, "A post ID is required to share a post.");
+    }
+
+    return this.send(threadId, {
+      business_id: this.config.businessId,
+      recipient_type: "CONVERSATION",
+      recipient: conversationId,
+      message_type: "SHARE_POST",
+      share_post: { item_id: itemId },
+    });
+  }
+
+  /**
    * Perform a send and record the resulting message ID.
    *
    * Shared by every outbound path so the echo-suppression bookkeeping cannot

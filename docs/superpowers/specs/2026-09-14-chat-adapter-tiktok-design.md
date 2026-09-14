@@ -118,16 +118,19 @@ Two deliberate divergences:
 
 ```
 src/
-  index.ts              factory function + public exports
+  index.ts              public exports
+  factory.ts            createTikTokAdapter, with env-var fallbacks
   types.ts              config, thread ID, TikTok wire types
-  adapter.ts            TikTokAdapter implements Adapter<TikTokThreadId, TikTokEvent>
-  message.ts            TikTokMessage (RawMessage implementation)
+  adapter.ts            TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage>
   lib/
     api-client.ts       fetch wrapper: auth header, envelope unwrap, error mapping
     token-manager.ts    access-token lifecycle and refresh
-    webhook.ts          signature verification + event deduplication
+    webhook.ts          signature verification
+    bounded-set.ts      dedupe and self-echo tracking, size-capped
     thread-id.ts        encode/decode thread IDs
-    format-converter.ts rich content -> plain text
+    format-converter.ts postable content -> plain text
+    card-to-text.ts     card flattening, buttons included
+    template.ts         card -> native Q&A button card, or null
 __tests__/              mirrors src/, all HTTP mocked
 ```
 
@@ -149,7 +152,7 @@ Responsibilities:
 - Emit refreshed credentials through an `onTokenRefresh` callback and let the
   host persist them. The adapter does not choose a storage backend.
 - Distinguish refresh-token expiry from transient refresh failure: the former is
-  a permanent `PermissionError` meaning "the operator must re-authorize"; the
+  a permanent `AuthenticationError` meaning "the operator must re-authorize"; the
   latter is retryable.
 
 Chat SDK's `setInstallation`/`getInstallation` installation store was considered
@@ -180,15 +183,26 @@ tolerance to match TikTok's sample. This is what prevents a captured request
 from being replayed later, so the tolerance is configurable but deliberately
 tight.
 
-Deduplication is keyed on `message_id`. Duplicate delivery is normal — TikTok
-retries on non-2xx — but the sharper problem is `im_send_msg`, which fires for
-the adapter's *own* API sends. Without deduplication the bot would ingest its
-own replies as new input and answer itself. Neither duplicates nor self-echoes
-may reach the host.
+Deduplication is keyed on `message_id`, and a message is recorded as seen only
+once dispatch is under way — recording it earlier would mean a message that
+never reached the host was nonetheless remembered as delivered, and therefore
+unrecoverable even on redelivery.
 
-Direction is not flagged on the payload. A message is inbound when
-`to_user.id` equals the configured `business_id`, which is why `businessId` is
-required configuration rather than something the adapter discovers.
+Direction is not flagged on the payload, and the sharper problem is
+`im_send_msg`, which fires for the adapter's *own* API sends. Left
+unrecognized, the bot ingests its own replies as new input and answers itself.
+
+Membership of the sent-message set is not sufficient to catch this: the echo
+can arrive before the send response that supplies the ID. So an echo is
+identified by `from_user.id` matching the configured `business_id` *and*
+`message_tag.source` being `API` — a signal available on the first webhook,
+with no dependency on ordering. That pairing also keeps the case that must not
+be swallowed: a message the business sent from the TikTok app carries source
+`APP` or `WEB`, so a human colleague still reaches the bot normally.
+
+Webhooks for every authorized account arrive at one app URL, so an envelope
+whose `user_openid` is not the configured `business_id` is refused rather than
+processed with this connection's credentials.
 
 ### Unsupported platform operations
 
@@ -237,10 +251,56 @@ which is step 1 work.
 ### Format conversion
 
 TikTok DMs are plain text. Cards, buttons, and markdown from the host must
-degrade visibly rather than silently vanish. The converter flattens Chat SDK postable content to text, rendering interactive
-affordances as readable text rather than dropping them. `@chat-adapter/shared`
-supplies `cardToFallbackText`, `extractCard`, and `normalizeCodeFences` for this,
-so the converter composes shared helpers rather than reimplementing flattening.
+degrade visibly rather than silently vanish. The converter flattens Chat SDK
+postable content to text, rendering interactive affordances as readable text
+rather than dropping them.
+
+`cardToFallbackText` from `@chat-adapter/shared` looked like the obvious tool
+and turned out to be wrong on two counts:
+
+- It wraps the card title in `*asterisks*`, which platforms rendering mrkdwn
+  show as bold and TikTok shows verbatim.
+- It renders `actions` as `null`, discarding every button. On a platform that
+  cannot draw buttons, that turns "Pick one:" into a question with no visible
+  options — precisely the silent loss this section exists to prevent.
+
+Card flattening therefore lives in `lib/card-to-text.ts`, which renders titles
+plainly and lists buttons, link buttons, and select options as bulleted
+choices. Disabled buttons are omitted rather than listed, since TikTok cannot
+convey a disabled state and an unselectable option is worse than an absent one.
+Inbound `template` messages are flattened the same way: title first, reply
+buttons beneath.
+
+### Cards as native buttons
+
+Flattening is the fallback, not the first choice. TikTok's Q&A button card
+carries a question and one to three reply buttons, so a card of that shape is
+sent as `message_type: "TEMPLATE"` and renders as real tappable buttons.
+`lib/template.ts` performs the conversion and returns `null` whenever anything
+would be lost, which sends the card down the text path instead:
+
+- more than three buttons, or none once disabled ones are removed;
+- a button label over 20 characters or an ID over 40 — TikTok defines no
+  truncation, and shortening a label would change what the user is agreeing to;
+- a question over 40 characters, or body prose that a title-only template
+  cannot carry;
+- link buttons or selects, whose URLs and option lists a template cannot
+  express.
+
+The send and webhook representations of a template differ, which is worth
+stating because it is easy to conflate them: the send request takes a flat
+`template.buttons[]` whose label field is `title`, while the webhook nests
+`template.elements[].buttons[]` and names that same field `text`.
+
+A tapped button arrives as an ordinary `im_receive_msg` text message whose body
+is the button label, accompanied by `reply_source_payload.reply_source_unique_id`
+carrying the button ID that was sent. Routing that back as a Chat SDK action
+is deferred: the plain-text path already handles the message correctly, and
+the action route cannot be verified without live credentials. Button `value`
+and `callbackUrl` are consequently not carried through.
+
+Because none of this is verified against a live account, `useTemplates: false`
+disables it and restores plain text for every card.
 
 ## Testing strategy
 
@@ -279,10 +339,10 @@ Steps are numbered as in the parent investigation.
 | 1 | TikTok developer app, API approval, test accounts | Deferred — blocked on external approval |
 | 2 | Package scaffold | Done |
 | 3 | `types.ts` | Done |
-| 4 | OAuth and token manager | Done |
+| 4 | OAuth and token manager | Refresh leg done; the authorization-code exchange is not implemented — the host performs the initial OAuth and supplies the resulting tokens |
 | 5 | `TikTokAdapter` class | Done |
-| 6 | Format converter | Done for text and card fallback; media pending v0.2 |
-| 7 | README, publish, directory listing | Planned |
+| 6 | Format converter | Done, including native Q&A button cards; media pending v0.2 |
+| 7 | README, publish, directory listing | README done; publishing and the directory listing pending |
 
 Steps 2–6 have no dependency on step 1. They produce a complete, tested package
 whose only unverified surface is wire-format fidelity.

@@ -3,6 +3,7 @@ import {
   AuthenticationError,
   NetworkError,
   PermissionError,
+  ResourceNotFoundError,
   ValidationError,
 } from "@chat-adapter/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -55,9 +56,24 @@ describe("mapTikTokError", () => {
     expect(mapTikTokError(TIKTOK_CODE.RATE_LIMITED, "slow down")).toBeInstanceOf(
       AdapterRateLimitError,
     );
-    expect(mapTikTokError(TIKTOK_CODE.MESSAGE_BLOCKED, "blocked")).not.toBeInstanceOf(
-      AdapterRateLimitError,
+    expect(mapTikTokError(TIKTOK_CODE.MESSAGE_BLOCKED, "blocked")).toBeInstanceOf(
+      ValidationError,
     );
+  });
+
+  it("maps the remaining documented codes", () => {
+    expect(mapTikTokError(TIKTOK_CODE.NOT_FOUND, "gone")).toBeInstanceOf(
+      ResourceNotFoundError,
+    );
+    expect(mapTikTokError(TIKTOK_CODE.UNSUPPORTED_FILE_TYPE, "nope")).toBeInstanceOf(
+      ValidationError,
+    );
+  });
+
+  it("treats an unknown code as retryable rather than permanent", () => {
+    // A code TikTok adds later is most likely transient. Classifying it
+    // non-retryable would discard messages that would have succeeded.
+    expect(mapTikTokError(59_999, "brand new")).toBeInstanceOf(NetworkError);
   });
 });
 

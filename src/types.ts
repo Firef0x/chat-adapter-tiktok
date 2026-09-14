@@ -69,6 +69,14 @@ export interface TikTokAdapterConfig {
   onTokenRefresh?: (tokens: TikTokTokens) => void | Promise<void>;
   /** Display name for the bot. Defaults to `"tiktok-bot"`. */
   userName?: string;
+  /**
+   * Send cards that fit TikTok's Q&A button card as real tappable buttons
+   * rather than a bulleted text list. Defaults to `true`.
+   *
+   * Set it to `false` if your account rejects template messages; cards then
+   * always degrade to plain text, which every account can send.
+   */
+  useTemplates?: boolean;
   /** Override the API host. Intended for testing. */
   baseUrl?: string;
   /** API version segment. Defaults to `"v1.3"`. */
@@ -265,7 +273,10 @@ export interface TikTokSendMessageData {
  * This is the `TRawMessage` generic of the Chat SDK `Adapter` interface: the
  * webhook content for inbound messages, and the send result for outbound ones.
  */
-export type TikTokRawMessage = TikTokMessageContent | TikTokSendMessageData;
+export type TikTokRawMessage =
+  | TikTokMessageContent
+  | TikTokRestMessage
+  | TikTokSendMessageData;
 
 // ---------------------------------------------------------------------------
 // Conversations and history
@@ -334,16 +345,26 @@ export interface TikTokMessageListData {
 /**
  * A message as returned by the REST message-list endpoint.
  *
- * Field-level detail beyond the identifiers is UNCONFIRMED — the published
- * response example was not retrieved in full, so content fields are modelled
- * permissively rather than guessed at precisely.
+ * Only the identifiers are confirmed. The content fields below are modelled on
+ * the send endpoint, which uses the same UPPERCASE vocabulary, but the
+ * published response example was never retrieved in full — so anything beyond
+ * `message_id` and `message_type` is UNCONFIRMED and must be treated as
+ * possibly absent.
+ *
+ * Note there is no index signature: extra fields still arrive at runtime and
+ * are ignored, and leaving it off keeps a misspelled field a compile error.
  */
 export interface TikTokRestMessage {
   message_id: string;
   message_type: TikTokRestMessageType;
-  /** Epoch milliseconds. */
+  /** Epoch milliseconds. UNCONFIRMED. */
   timestamp?: number;
-  [key: string]: unknown;
+  /** UNCONFIRMED; modelled on the send endpoint's shape. */
+  text?: { body?: string };
+  /** UNCONFIRMED. */
+  image?: { media_id?: string };
+  /** UNCONFIRMED. */
+  share_post?: { embed_url?: string; video_id?: string };
 }
 
 /** Per-conversation capability probe, e.g. whether images may be sent. */
@@ -428,10 +449,11 @@ export interface TikTokContentBase {
 /**
  * Parsed `content` for `im_send_msg` and `im_receive_msg`.
  *
- * There is no direction flag: a message is inbound when `to_user.id` equals
- * your own `business_id`. `im_send_msg` also fires for messages you sent
- * through the API, so deduplication by `message_id` is required to avoid
- * echoing your own replies back into the conversation.
+ * There is no direction flag. `im_send_msg` fires for everything the business
+ * account sends, including echoes of your own API calls, so an outbound echo
+ * is identified by `from_user.id` matching your `business_id` together with
+ * `message_tag.source` being `API` — which distinguishes it from a human
+ * colleague replying in the TikTok app.
  */
 export interface TikTokMessageContent extends TikTokContentBase {
   message_id: string;

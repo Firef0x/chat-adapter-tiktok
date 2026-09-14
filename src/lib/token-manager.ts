@@ -1,5 +1,6 @@
-import { AuthenticationError } from "@chat-adapter/shared";
+import { AuthenticationError, NetworkError } from "@chat-adapter/shared";
 import type { Logger } from "chat";
+import { ConsoleLogger } from "chat";
 
 import type { TikTokApiEnvelope, TikTokTokenResponse, TikTokTokens } from "../types.js";
 import { TIKTOK_CODE } from "../types.js";
@@ -14,8 +15,8 @@ import { ADAPTER_NAME } from "./thread-id.js";
 /**
  * How long before expiry a token is considered stale.
  *
- * Refreshing early costs one extra call a day and avoids racing the expiry on
- * a request that would otherwise fail.
+ * This shifts each refresh slightly earlier rather than adding any, and avoids
+ * racing the expiry on a request that would otherwise fail in flight.
  */
 export const REFRESH_SKEW_MS = 5 * 60 * 1000;
 
@@ -33,7 +34,16 @@ export interface TokenManagerOptions {
   fetchImpl?: typeof fetch;
   /** Injectable clock, for tests. */
   now?: () => number;
-  logger?: Logger;
+  /**
+   * Resolved on each use rather than captured.
+   *
+   * The adapter swaps its logger for the host's during `initialize()`. A
+   * reference captured at construction would keep pointing at the bootstrap
+   * `ConsoleLogger`, sending the most consequential message this class can
+   * emit — a failure to persist rotated credentials — to stdout instead of
+   * the host's log pipeline, where nobody's alerts would ever match it.
+   */
+  logger?: Logger | (() => Logger);
 }
 
 /**
@@ -79,8 +89,18 @@ export class TikTokTokenManager implements AccessTokenProvider {
       accessTokenExpiresAt: this.accessTokenExpiresAt,
       refreshTokenExpiresAt: this.refreshTokenExpiresAt,
       businessId: this.options.businessId,
-      scopes: this.scopes,
+      // Copied: handing out the live array lets a caller mutate internal state.
+      scopes: [...this.scopes],
     };
+  }
+
+  /** The current logger, falling back to console so this can never be silent. */
+  private get logger(): Logger {
+    const configured = this.options.logger;
+    if (typeof configured === "function") {
+      return configured();
+    }
+    return configured ?? new ConsoleLogger();
   }
 
   /** Return a usable access token, refreshing first if it is near expiry. */
@@ -119,18 +139,50 @@ export class TikTokTokenManager implements AccessTokenProvider {
 
     // The OAuth endpoints authenticate with credentials in the body and must
     // not carry an Access-Token header.
-    const response = await this.fetchImpl(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: this.options.appId,
-        client_secret: this.options.appSecret,
-        grant_type: "refresh_token",
-        refresh_token: this.refreshToken,
-      }),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: this.options.appId,
+          client_secret: this.options.appSecret,
+          grant_type: "refresh_token",
+          refresh_token: this.refreshToken,
+        }),
+      });
+    } catch (error) {
+      // A transport failure must stay retryable. Letting the raw error escape
+      // would bypass the caller's retry classification entirely.
+      throw new NetworkError(
+        ADAPTER_NAME,
+        "Token refresh request failed",
+        error instanceof Error ? error : undefined,
+      );
+    }
 
-    const envelope = (await response.json()) as TikTokApiEnvelope<TikTokTokenResponse>;
+    let envelope: TikTokApiEnvelope<TikTokTokenResponse>;
+    try {
+      envelope = (await response.json()) as TikTokApiEnvelope<TikTokTokenResponse>;
+    } catch (error) {
+      // Typically a CDN or gateway error page. Reporting it as a parse error
+      // would read as a bug in this library rather than a transient fault.
+      throw new NetworkError(
+        ADAPTER_NAME,
+        `Non-JSON response from the token endpoint (HTTP ${response.status})`,
+        error instanceof Error ? error : undefined,
+      );
+    }
+
+    // A non-numeric code means the body never came from the API layer, so it
+    // says nothing about the grant. Demanding re-authorization here would send
+    // an operator through a manual OAuth flow over a five-minute outage.
+    if (typeof envelope?.code !== "number") {
+      throw new NetworkError(
+        ADAPTER_NAME,
+        `Unrecognized token-endpoint response (HTTP ${response.status})`,
+      );
+    }
 
     if (envelope.code !== TIKTOK_CODE.OK) {
       throw this.refreshFailure(envelope);
@@ -162,7 +214,37 @@ export class TikTokTokenManager implements AccessTokenProvider {
     );
   }
 
+  /**
+   * Adopt a refreshed grant, but only if it is complete.
+   *
+   * A partial payload applied blindly is worse than a failed refresh: a
+   * missing `expires_in` yields `NaN`, which makes the freshness check at
+   * every call false and turns normal traffic into a refresh-per-request
+   * storm — and since each refresh rotates the token, the host would be
+   * handed, and would persist, an `undefined` refresh token over its good one.
+   */
   private applyTokenResponse(data: TikTokTokenResponse): void {
+    const missing: string[] = [];
+    if (!data?.access_token) {
+      missing.push("access_token");
+    }
+    if (!data?.refresh_token) {
+      missing.push("refresh_token");
+    }
+    if (!Number.isFinite(data?.expires_in)) {
+      missing.push("expires_in");
+    }
+    if (!Number.isFinite(data?.refresh_token_expires_in)) {
+      missing.push("refresh_token_expires_in");
+    }
+
+    if (missing.length > 0) {
+      throw new NetworkError(
+        ADAPTER_NAME,
+        `TikTok returned an incomplete token response (missing or invalid: ${missing.join(", ")}). The existing credentials were kept.`,
+      );
+    }
+
     const now = this.now();
     this.accessToken = data.access_token;
     this.refreshToken = data.refresh_token;
@@ -183,7 +265,7 @@ export class TikTokTokenManager implements AccessTokenProvider {
       // would not undo it — and the new token works in memory, so the process
       // can keep serving. Log loudly: until persistence succeeds, a restart
       // loses the connection permanently.
-      this.options.logger?.error(
+      this.logger.error(
         "Failed to persist refreshed TikTok tokens. The connection will break on restart unless they are saved.",
         { error },
       );

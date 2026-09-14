@@ -1,4 +1,8 @@
-import { AdapterRateLimitError, AuthenticationError } from "@chat-adapter/shared";
+import {
+  AdapterRateLimitError,
+  AuthenticationError,
+  NetworkError,
+} from "@chat-adapter/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { REFRESH_SKEW_MS, TikTokTokenManager } from "../../src/lib/token-manager.js";
@@ -189,6 +193,57 @@ describe("TikTokTokenManager", () => {
     const { manager } = build({ accessTokenExpiresAt: 0, fetchImpl: fetchImpl as never });
 
     await expect(manager.getAccessToken()).rejects.toBeInstanceOf(AdapterRateLimitError);
+  });
+
+  it("keeps a server error retryable rather than demanding re-authorization", async () => {
+    // Asserting only that it throws would still pass if 51065 were
+    // misclassified as terminal, sending an operator through a manual OAuth
+    // flow over a transient TikTok outage.
+    const fetchImpl = vi.fn(async () => errorEnvelope(TIKTOK_CODE.SYSTEM_ERROR));
+    const { manager } = build({ accessTokenExpiresAt: 0, fetchImpl: fetchImpl as never });
+
+    await expect(manager.getAccessToken()).rejects.toBeInstanceOf(NetworkError);
+    await expect(manager.getAccessToken()).rejects.not.toBeInstanceOf(
+      AuthenticationError,
+    );
+  });
+
+  it("keeps existing credentials when the refresh response is incomplete", async () => {
+    // Applying a partial payload yields NaN expiry (refresh on every call) and
+    // an undefined refresh token that the host would persist over its good one.
+    const saved: TikTokTokens[] = [];
+    const fetchImpl = vi.fn(async () => tokenEnvelope({ expires_in: undefined }));
+    const { manager } = build({
+      accessTokenExpiresAt: 0,
+      fetchImpl: fetchImpl as never,
+      onTokenRefresh: (tokens) => {
+        saved.push(tokens);
+      },
+    });
+
+    await expect(manager.getAccessToken()).rejects.toThrow(/incomplete token response/);
+    expect(saved).toHaveLength(0);
+    expect(manager.getTokens().refreshToken).toBe("refresh_old");
+  });
+
+  it("wraps a non-JSON token response as a network fault", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      status: 502,
+      json: async () => {
+        throw new Error("Unexpected token <");
+      },
+    }));
+    const { manager } = build({ accessTokenExpiresAt: 0, fetchImpl: fetchImpl as never });
+
+    await expect(manager.getAccessToken()).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("does not hand out its internal scopes array", async () => {
+    const { manager } = build({ accessTokenExpiresAt: 0 });
+    await manager.getAccessToken();
+
+    manager.getTokens().scopes.push("injected");
+    expect(manager.getTokens().scopes).not.toContain("injected");
   });
 
   it("recovers on a later attempt after a transient failure", async () => {

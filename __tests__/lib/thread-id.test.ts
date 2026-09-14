@@ -31,14 +31,26 @@ describe("thread IDs", () => {
     expect(decodeThreadId(threadId).conversationId).toBe("conv:with:colons");
   });
 
-  it("derives a channel ID that is the thread ID minus the conversation", () => {
+  it("derives a channel ID from the business account", () => {
+    // Pinned to a literal rather than re-derived from the implementation,
+    // which would pass under any encoding change applied on both sides.
     const threadId = encodeThreadId({
       businessId: "biz_123",
       conversationId: "conv_456",
     });
-    expect(channelIdFromThreadId(threadId)).toBe(
-      threadId.split(":").slice(0, 2).join(":"),
-    );
+    expect(threadId).toBe("tiktok:Yml6XzEyMw:Y29udl80NTY");
+    expect(channelIdFromThreadId(threadId)).toBe("tiktok:Yml6XzEyMw");
+  });
+
+  it("rejects a thread ID with trailing junk instead of silently accepting it", () => {
+    // Base64url decoding discards invalid characters, so without a
+    // canonicality check many strings would alias to one conversation — and a
+    // corrupted one would decode to a plausible but wrong ID.
+    const threadId = encodeThreadId({
+      businessId: "biz_123",
+      conversationId: "conv_456",
+    });
+    expect(() => decodeThreadId(`${threadId}$$$`)).toThrow(/Invalid TikTok thread ID/);
   });
 
   it.each([

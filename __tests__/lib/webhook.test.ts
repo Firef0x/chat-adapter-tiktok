@@ -95,16 +95,33 @@ describe("verifyWebhookSignature", () => {
   });
 
   it("rejects a truncated signature without throwing", () => {
-    // timingSafeEqual throws on length mismatch; this must not escape.
+    // timingSafeEqual throws on length mismatch; this must not escape. The
+    // result must also be a rejection — asserting only "does not throw" would
+    // still pass if the guard returned valid.
     const header = `t=${NOW_SECONDS},s=abc`;
-    expect(() =>
-      verifyWebhookSignature({
+    let result: ReturnType<typeof verifyWebhookSignature> | undefined;
+    expect(() => {
+      result = verifyWebhookSignature({
         header,
         rawBody: BODY,
         appSecret: SECRET,
         now: NOW_MS,
-      }),
-    ).not.toThrow();
+      });
+    }).not.toThrow();
+    expect(result).toMatchObject({ valid: false });
+  });
+
+  it("treats an explicit tolerance of 0 as zero, not as unset", () => {
+    // `?? DEFAULT` only catches undefined, so 0 must genuinely mean 0.
+    expect(
+      verifyWebhookSignature({
+        header: validHeader(BODY, NOW_SECONDS - 2),
+        rawBody: BODY,
+        appSecret: SECRET,
+        now: NOW_MS,
+        toleranceSeconds: 0,
+      }).valid,
+    ).toBe(false);
   });
 
   it("rejects a replayed request outside the tolerance", () => {

@@ -8,8 +8,8 @@ export const ADAPTER_NAME = "tiktok";
  * Encode a business account and conversation into a Chat SDK thread ID.
  *
  * Both segments are base64url-encoded. Conversation IDs are base64-like and
- * routinely contain `+` and `=`, which would otherwise collide with the `:`
- * delimiter or be mangled in transport.
+ * routinely contain `+` and `=`, which are mangled in transport — a `+`
+ * decodes back as a space — and which would otherwise vary the segment count.
  */
 export function encodeThreadId(data: TikTokThreadId): string {
   if (!data.businessId) {
@@ -44,7 +44,19 @@ export function decodeThreadId(threadId: string): TikTokThreadId {
     );
   }
 
-  return { businessId, conversationId };
+  // Base64url decoding silently discards invalid characters, so a corrupted
+  // thread ID would decode to a plausible but wrong conversation — surfacing
+  // much later as TikTok reporting a conversation that does not exist.
+  // Re-encoding and comparing makes the encoding canonical.
+  const decoded = { businessId, conversationId };
+  if (encodeThreadId(decoded) !== threadId) {
+    throw new ValidationError(
+      ADAPTER_NAME,
+      `Invalid TikTok thread ID: ${threadId}`,
+    );
+  }
+
+  return decoded;
 }
 
 /**

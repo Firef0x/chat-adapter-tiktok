@@ -27,7 +27,7 @@ export {
   uploadImage,
   type UploadImageOptions,
 } from "./lib/media.js";
-export { cardToTemplate, TEMPLATE_LIMITS } from "./lib/template.js";
+export { cardToTemplate, getButtonTapId, TEMPLATE_LIMITS } from "./lib/template.js";
 export {
   channelIdFromThreadId,
   decodeChannelId,

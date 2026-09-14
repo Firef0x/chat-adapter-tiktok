@@ -153,3 +153,31 @@ function stripActions(children: CardChild[]): CardChild[] {
 
   return kept;
 }
+
+/**
+ * Recover the button a message came from, if any.
+ *
+ * When a user taps a reply button, TikTok does not emit a distinct event: it
+ * sends the button's label as an ordinary text message on the user's behalf,
+ * and attaches `reply_source_payload` carrying the `id` that was set on the
+ * button. So a tap is genuinely a message, and is delivered as one.
+ *
+ * That is also why taps are not dispatched through Chat SDK's action pipeline.
+ * Routing them as actions instead of messages would silence every host that
+ * only registers message handlers, and dispatching both would hand a host with
+ * both kinds of handler the same tap twice. This accessor gives the button
+ * identity to hosts that want it, without changing how the message flows.
+ *
+ * @returns the button's ID, or `null` when the message was not a button tap.
+ */
+export function getButtonTapId(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) {
+    return null;
+  }
+
+  const payload = (raw as { reply_source_payload?: { reply_source_unique_id?: unknown } })
+    .reply_source_payload;
+
+  const id = payload?.reply_source_unique_id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}

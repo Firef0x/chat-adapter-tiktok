@@ -161,6 +161,7 @@ asymmetry for you.
 | Listing conversations | ✅ | `listConversations()` is cheap; `listThreads()` costs one request per conversation |
 | Channel info | ✅ | `fetchChannelInfo()` returns the business account's profile |
 | OAuth | ✅ | `buildAuthorizeUrl()` and `exchangeAuthCode()`, plus automatic refresh |
+| Button taps | ✅ | Delivered as messages; `getButtonTapId()` recovers the button |
 | Images | ✅ | Send and receive, subject to TikTok's regional gating |
 | Video and other media | ⚠️ | Received as a downloadable attachment; TikTok cannot send them |
 | Reactions | ❌ | No platform API; throws `NotImplementedError` |
@@ -225,6 +226,26 @@ option is worse than an absent one. Inbound template messages are rendered the
 same way.
 
 Set `useTemplates: false` to always send plain text.
+
+When a user taps a button, TikTok does not emit a distinct event — it sends the
+button's label as an ordinary text message on their behalf, and attaches the
+`id` you set on the button. `getButtonTapId()` recovers it:
+
+```typescript
+import { getButtonTapId } from "chat-adapter-tiktok";
+
+chat.on("message", async (message, thread) => {
+  const button = getButtonTapId(message.raw);
+  if (button === "talk_to_human") {
+    await thread.post("Connecting you to someone now.");
+  }
+});
+```
+
+Taps are deliberately **not** dispatched through Chat SDK's action pipeline: a
+tap really is a message on TikTok, so routing it as an action would silence
+hosts that only handle messages, and emitting both would deliver the same tap
+twice.
 
 ## Token lifecycle
 

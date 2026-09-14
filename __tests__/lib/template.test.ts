@@ -1,7 +1,7 @@
 import type { CardElement } from "chat";
 import { describe, expect, it } from "vitest";
 
-import { cardToTemplate, TEMPLATE_LIMITS } from "../../src/lib/template.js";
+import { cardToTemplate, getButtonTapId, TEMPLATE_LIMITS } from "../../src/lib/template.js";
 
 function buttons(count: number, label = "Yes") {
   return Array.from({ length: count }, (_, i) => ({
@@ -232,5 +232,53 @@ describe("cardToTemplate", () => {
   it("survives a card with no children", () => {
     expect(() => cardToTemplate({ type: "card", title: "Bare" } as CardElement)).not.toThrow();
     expect(cardToTemplate({ type: "card", title: "Bare" } as CardElement)).toBeNull();
+  });
+});
+
+describe("getButtonTapId", () => {
+  it("recovers the button id TikTok echoes back on a tap", () => {
+    expect(
+      getButtonTapId({
+        type: "text",
+        text: { body: "Track my order" },
+        reply_source_payload: {
+          reply_source_msg_id: "m_1",
+          reply_source_unique_id: "track",
+        },
+      }),
+    ).toBe("track");
+  });
+
+  it("returns null for an ordinary message the user typed", () => {
+    expect(getButtonTapId({ type: "text", text: { body: "hello" } })).toBeNull();
+  });
+
+  it.each([
+    ["null", null],
+    ["a string", "nope"],
+    ["an empty id", { reply_source_payload: { reply_source_unique_id: "" } }],
+    ["a non-string id", { reply_source_payload: { reply_source_unique_id: 7 } }],
+    ["an empty payload", { reply_source_payload: {} }],
+  ])("returns null for %s", (_label, raw) => {
+    expect(getButtonTapId(raw)).toBeNull();
+  });
+
+  it("round-trips the id set when the card was sent", () => {
+    // The value the adapter puts on the button is the value it gets back.
+    const template = cardToTemplate({
+      type: "card",
+      title: "How can we help?",
+      children: [
+        {
+          type: "actions",
+          children: [{ type: "button", id: "talk_to_human", label: "Talk to a human" }],
+        },
+      ],
+    });
+
+    const sentId = template?.buttons[0]?.id;
+    expect(getButtonTapId({ reply_source_payload: { reply_source_unique_id: sentId } })).toBe(
+      "talk_to_human",
+    );
   });
 });

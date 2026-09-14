@@ -53,6 +53,13 @@ export interface TikTokAdapterConfig {
    */
   accessTokenExpiresAt?: number;
   /**
+   * When the refresh token expires, as Unix epoch milliseconds.
+   *
+   * Supplying it lets the adapter fail fast with a clear "re-authorize"
+   * error instead of attempting a refresh that cannot succeed.
+   */
+  refreshTokenExpiresAt?: number;
+  /**
    * Called whenever the adapter obtains new tokens.
    *
    * The adapter keeps refreshed tokens in memory only. Persist them here, or

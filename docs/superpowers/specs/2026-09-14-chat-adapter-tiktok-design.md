@@ -193,10 +193,16 @@ required configuration rather than something the adapter discovers.
 ### Unsupported platform operations
 
 Chat SDK's `Adapter` interface makes `addReaction`, `removeReaction`,
-`editMessage`, `deleteMessage`, and `startTyping` **required** members, but
-TikTok's messaging API supports none of them. They are implemented as explicit
-throws rather than silent no-ops, so a host that calls them learns immediately
-that the capability is absent instead of believing a message was edited or a
+`editMessage`, `deleteMessage`, and `startTyping` **required** members. TikTok
+supports only the last of these.
+
+`startTyping` and `markAsRead` map onto TikTok's `SENDER_ACTION` message type
+(`TYPING` and `MARK_READ`), so both are genuinely implemented — an earlier
+draft of this design wrongly listed typing as unsupported.
+
+The remaining four are implemented as explicit throws of `NotImplementedError`
+rather than silent no-ops, so a host that calls them learns immediately that
+the capability is absent instead of believing a message was edited or a
 reaction recorded. A capability should never be advertised as available until
 it has been verified.
 
@@ -271,11 +277,11 @@ Steps are numbered as in the parent investigation.
 | Step | Content | Status |
 |---|---|---|
 | 1 | TikTok developer app, API approval, test accounts | Deferred — blocked on external approval |
-| 2 | Package scaffold | This iteration |
-| 3 | `types.ts` | This iteration |
-| 4 | OAuth and token manager | Planned |
-| 5 | `TikTokAdapter` class | Planned |
-| 6 | Format converter | Planned |
+| 2 | Package scaffold | Done |
+| 3 | `types.ts` | Done |
+| 4 | OAuth and token manager | Done |
+| 5 | `TikTokAdapter` class | Done |
+| 6 | Format converter | Done for text and card fallback; media pending v0.2 |
 | 7 | README, publish, directory listing | Planned |
 
 Steps 2–6 have no dependency on step 1. They produce a complete, tested package

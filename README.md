@@ -99,10 +99,15 @@ These come from the TikTok platform, not from this adapter:
   post.
 - **1:1 conversations only.** There are no group threads.
 - **Text only in this release.** Image attachments are planned for v0.2. Rich
-  content (cards, buttons, markdown) is flattened to readable plain text.
-- **Reactions, edits, deletes, and typing indicators are unsupported** by the
-  platform API. Chat SDK requires these methods on every adapter, so they are
-  present but throw rather than failing silently.
+  content (cards, buttons, markdown) is flattened to readable plain text, and
+  inbound images, stickers, and videos arrive as a visible placeholder such as
+  `[image]` rather than as empty text.
+- **Reactions, edits, and deletes are unsupported** by the platform API. Chat
+  SDK requires these methods on every adapter, so they are present but throw
+  `NotImplementedError` rather than failing silently.
+
+Typing indicators and read receipts *are* supported, through TikTok's
+`SENDER_ACTION` message type — `startTyping()` and `markAsRead()` both work.
 
 ## Development
 

@@ -1,0 +1,192 @@
+import { AuthenticationError } from "@chat-adapter/shared";
+import type { Logger } from "chat";
+
+import type { TikTokApiEnvelope, TikTokTokenResponse, TikTokTokens } from "../types.js";
+import { TIKTOK_CODE } from "../types.js";
+import {
+  type AccessTokenProvider,
+  mapTikTokError,
+  TIKTOK_API_HOST,
+  TIKTOK_DEFAULT_API_VERSION,
+} from "./api-client.js";
+import { ADAPTER_NAME } from "./thread-id.js";
+
+/**
+ * How long before expiry a token is considered stale.
+ *
+ * Refreshing early costs one extra call a day and avoids racing the expiry on
+ * a request that would otherwise fail.
+ */
+export const REFRESH_SKEW_MS = 5 * 60 * 1000;
+
+export interface TokenManagerOptions {
+  appId: string;
+  appSecret: string;
+  accessToken: string;
+  refreshToken: string;
+  accessTokenExpiresAt?: number;
+  refreshTokenExpiresAt?: number;
+  businessId: string;
+  onTokenRefresh?: (tokens: TikTokTokens) => void | Promise<void>;
+  baseUrl?: string;
+  apiVersion?: string;
+  fetchImpl?: typeof fetch;
+  /** Injectable clock, for tests. */
+  now?: () => number;
+  logger?: Logger;
+}
+
+/**
+ * Owns the access-token lifecycle for one connected business account.
+ *
+ * TikTok access tokens live 24 hours and refresh tokens a year, and the
+ * refresh token **rotates on every use** — so this class is also responsible
+ * for handing the rotated credentials back to the host.
+ */
+export class TikTokTokenManager implements AccessTokenProvider {
+  private accessToken: string;
+  private refreshToken: string;
+  private accessTokenExpiresAt: number;
+  private refreshTokenExpiresAt: number;
+  private scopes: string[] = [];
+
+  /** Shared by every caller that arrives while a refresh is in flight. */
+  private inflight: Promise<string> | null = null;
+
+  private readonly options: TokenManagerOptions;
+  private readonly now: () => number;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(options: TokenManagerOptions) {
+    this.options = options;
+    this.now = options.now ?? (() => Date.now());
+    this.fetchImpl = options.fetchImpl ?? fetch;
+
+    this.accessToken = options.accessToken;
+    this.refreshToken = options.refreshToken;
+    // An unknown expiry is treated as already expired: one refresh up front
+    // beats discovering the expiry through a failed API call.
+    this.accessTokenExpiresAt = options.accessTokenExpiresAt ?? 0;
+    this.refreshTokenExpiresAt =
+      options.refreshTokenExpiresAt ?? Number.POSITIVE_INFINITY;
+  }
+
+  /** Current credentials, for a host that wants to persist them. */
+  getTokens(): TikTokTokens {
+    return {
+      accessToken: this.accessToken,
+      refreshToken: this.refreshToken,
+      accessTokenExpiresAt: this.accessTokenExpiresAt,
+      refreshTokenExpiresAt: this.refreshTokenExpiresAt,
+      businessId: this.options.businessId,
+      scopes: this.scopes,
+    };
+  }
+
+  /** Return a usable access token, refreshing first if it is near expiry. */
+  async getAccessToken(): Promise<string> {
+    if (this.now() < this.accessTokenExpiresAt - REFRESH_SKEW_MS) {
+      return this.accessToken;
+    }
+    return this.refreshAccessToken();
+  }
+
+  /**
+   * Refresh unconditionally.
+   *
+   * Concurrent callers share a single in-flight request: without this, a burst
+   * of requests arriving at expiry would each rotate the refresh token, and
+   * every rotation but the last would be invalidated mid-flight.
+   */
+  refreshAccessToken(): Promise<string> {
+    this.inflight ??= this.performRefresh().finally(() => {
+      this.inflight = null;
+    });
+    return this.inflight;
+  }
+
+  private async performRefresh(): Promise<string> {
+    if (this.now() >= this.refreshTokenExpiresAt) {
+      throw new AuthenticationError(
+        ADAPTER_NAME,
+        "TikTok refresh token has expired. The connection must be re-authorized.",
+      );
+    }
+
+    const url = `${(this.options.baseUrl ?? TIKTOK_API_HOST).replace(/\/+$/, "")}/open_api/${
+      this.options.apiVersion ?? TIKTOK_DEFAULT_API_VERSION
+    }/tt_user/oauth2/refresh_token/`;
+
+    // The OAuth endpoints authenticate with credentials in the body and must
+    // not carry an Access-Token header.
+    const response = await this.fetchImpl(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: this.options.appId,
+        client_secret: this.options.appSecret,
+        grant_type: "refresh_token",
+        refresh_token: this.refreshToken,
+      }),
+    });
+
+    const envelope = (await response.json()) as TikTokApiEnvelope<TikTokTokenResponse>;
+
+    if (envelope.code !== TIKTOK_CODE.OK) {
+      throw this.refreshFailure(envelope);
+    }
+
+    this.applyTokenResponse(envelope.data);
+    await this.notifyHost();
+    return this.accessToken;
+  }
+
+  /**
+   * Decide whether a failed refresh is transient or terminal.
+   *
+   * Throttling and server errors are worth retrying with the same refresh
+   * token. Anything else means the token will not work again, and an operator
+   * has to re-authorize.
+   */
+  private refreshFailure(envelope: TikTokApiEnvelope<unknown>): Error {
+    if (
+      envelope.code === TIKTOK_CODE.RATE_LIMITED ||
+      envelope.code === TIKTOK_CODE.SYSTEM_ERROR
+    ) {
+      return mapTikTokError(envelope.code, envelope.message, envelope.request_id);
+    }
+
+    return new AuthenticationError(
+      ADAPTER_NAME,
+      `TikTok refused to refresh the access token (code ${envelope.code}: ${envelope.message}). The connection must be re-authorized.`,
+    );
+  }
+
+  private applyTokenResponse(data: TikTokTokenResponse): void {
+    const now = this.now();
+    this.accessToken = data.access_token;
+    this.refreshToken = data.refresh_token;
+    this.accessTokenExpiresAt = now + data.expires_in * 1000;
+    this.refreshTokenExpiresAt = now + data.refresh_token_expires_in * 1000;
+    this.scopes = data.scope ? data.scope.split(",") : [];
+  }
+
+  private async notifyHost(): Promise<void> {
+    if (!this.options.onTokenRefresh) {
+      return;
+    }
+
+    try {
+      await this.options.onTokenRefresh(this.getTokens());
+    } catch (error) {
+      // The rotation already happened at TikTok, so failing the caller here
+      // would not undo it — and the new token works in memory, so the process
+      // can keep serving. Log loudly: until persistence succeeds, a restart
+      // loses the connection permanently.
+      this.options.logger?.error(
+        "Failed to persist refreshed TikTok tokens. The connection will break on restart unless they are saved.",
+        { error },
+      );
+    }
+  }
+}

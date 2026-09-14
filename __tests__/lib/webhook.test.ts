@@ -1,0 +1,199 @@
+import crypto from "node:crypto";
+
+import { describe, expect, it } from "vitest";
+
+import { BoundedSet } from "../../src/lib/bounded-set.js";
+import {
+  parseSignatureHeader,
+  signWebhookBody,
+  verifyWebhookSignature,
+} from "../../src/lib/webhook.js";
+
+const SECRET = "app_secret_value";
+const BODY = '{"client_key":"app_1","event":"im_receive_msg","content":"{}"}';
+const NOW_SECONDS = 1_700_000_000;
+const NOW_MS = NOW_SECONDS * 1000;
+
+function validHeader(body = BODY, seconds = NOW_SECONDS) {
+  return signWebhookBody(body, SECRET, seconds);
+}
+
+describe("parseSignatureHeader", () => {
+  it("reads t and s", () => {
+    expect(parseSignatureHeader("t=123,s=abc")).toEqual({
+      timestamp: 123,
+      signature: "abc",
+    });
+  });
+
+  it("matches by name, not position", () => {
+    // TikTok's own sample reads these positionally; this order must still work.
+    expect(parseSignatureHeader("s=abc,t=123")).toEqual({
+      timestamp: 123,
+      signature: "abc",
+    });
+  });
+
+  it.each([
+    ["missing s", "t=123"],
+    ["missing t", "s=abc"],
+    ["no pairs", "garbage"],
+    ["non-numeric t", "t=abc,s=abc"],
+    ["empty", ""],
+  ])("returns null for a malformed header (%s)", (_label, header) => {
+    expect(parseSignatureHeader(header)).toBeNull();
+  });
+});
+
+describe("verifyWebhookSignature", () => {
+  it("accepts a correctly signed body", () => {
+    expect(
+      verifyWebhookSignature({
+        header: validHeader(),
+        rawBody: BODY,
+        appSecret: SECRET,
+        now: NOW_MS,
+      }),
+    ).toEqual({ valid: true });
+  });
+
+  it.each([
+    ["missing header", null],
+    ["malformed header", "nonsense"],
+  ])("rejects a %s", (_label, header) => {
+    const result = verifyWebhookSignature({
+      header,
+      rawBody: BODY,
+      appSecret: SECRET,
+      now: NOW_MS,
+    });
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects a signature computed with the wrong secret", () => {
+    const header = signWebhookBody(BODY, "wrong_secret", NOW_SECONDS);
+    expect(
+      verifyWebhookSignature({
+        header,
+        rawBody: BODY,
+        appSecret: SECRET,
+        now: NOW_MS,
+      }),
+    ).toMatchObject({ valid: false, reason: "signature mismatch" });
+  });
+
+  it("rejects a tampered body", () => {
+    const header = validHeader();
+    expect(
+      verifyWebhookSignature({
+        header,
+        rawBody: `${BODY} `,
+        appSecret: SECRET,
+        now: NOW_MS,
+      }),
+    ).toMatchObject({ valid: false, reason: "signature mismatch" });
+  });
+
+  it("rejects a truncated signature without throwing", () => {
+    // timingSafeEqual throws on length mismatch; this must not escape.
+    const header = `t=${NOW_SECONDS},s=abc`;
+    expect(() =>
+      verifyWebhookSignature({
+        header,
+        rawBody: BODY,
+        appSecret: SECRET,
+        now: NOW_MS,
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects a replayed request outside the tolerance", () => {
+    const header = validHeader(BODY, NOW_SECONDS - 60);
+    const result = verifyWebhookSignature({
+      header,
+      rawBody: BODY,
+      appSecret: SECRET,
+      now: NOW_MS,
+    });
+    expect(result.valid).toBe(false);
+    expect((result as { reason: string }).reason).toMatch(/away from local time/);
+  });
+
+  it("tolerates small clock drift in both directions", () => {
+    for (const offset of [-4, 4]) {
+      expect(
+        verifyWebhookSignature({
+          header: validHeader(BODY, NOW_SECONDS + offset),
+          rawBody: BODY,
+          appSecret: SECRET,
+          now: NOW_MS,
+        }).valid,
+      ).toBe(true);
+    }
+  });
+
+  it("honours a widened tolerance", () => {
+    expect(
+      verifyWebhookSignature({
+        header: validHeader(BODY, NOW_SECONDS - 60),
+        rawBody: BODY,
+        appSecret: SECRET,
+        now: NOW_MS,
+        toleranceSeconds: 120,
+      }),
+    ).toEqual({ valid: true });
+  });
+
+  it("verifies raw bytes, so a re-serialized body fails", () => {
+    // The practical trap: JSON.stringify(JSON.parse(body)) drops whitespace
+    // and would never reproduce the original HMAC.
+    const spaced = '{"a": 1,  "b": 2}';
+    const header = signWebhookBody(spaced, SECRET, NOW_SECONDS);
+    const reserialized = JSON.stringify(JSON.parse(spaced));
+
+    expect(
+      verifyWebhookSignature({
+        header,
+        rawBody: spaced,
+        appSecret: SECRET,
+        now: NOW_MS,
+      }).valid,
+    ).toBe(true);
+    expect(
+      verifyWebhookSignature({
+        header,
+        rawBody: reserialized,
+        appSecret: SECRET,
+        now: NOW_MS,
+      }).valid,
+    ).toBe(false);
+  });
+
+  it("signs exactly `${t}.${body}` with HMAC-SHA256 hex", () => {
+    // Pinned against an independent computation so a refactor cannot quietly
+    // change the signing string.
+    const expected = crypto
+      .createHmac("sha256", SECRET)
+      .update(`${NOW_SECONDS}.${BODY}`)
+      .digest("hex");
+    expect(validHeader()).toBe(`t=${NOW_SECONDS},s=${expected}`);
+  });
+});
+
+describe("BoundedSet", () => {
+  it("reports first insertion and rejects repeats", () => {
+    const set = new BoundedSet(10);
+    expect(set.add("a")).toBe(true);
+    expect(set.add("a")).toBe(false);
+  });
+
+  it("evicts the oldest entries past its limit", () => {
+    const set = new BoundedSet(3);
+    for (const value of ["a", "b", "c", "d"]) {
+      set.add(value);
+    }
+    expect(set.size).toBe(3);
+    expect(set.has("a")).toBe(false);
+    expect(set.has("d")).toBe(true);
+  });
+});

@@ -58,5 +58,31 @@ export function decodeThreadId(threadId: string): TikTokThreadId {
  */
 export function channelIdFromThreadId(threadId: string): string {
   const { businessId } = decodeThreadId(threadId);
+  return encodeChannelId(businessId);
+}
+
+/** Encode a business account as a channel ID. */
+export function encodeChannelId(businessId: string): string {
+  if (!businessId) {
+    throw new ValidationError(ADAPTER_NAME, "businessId is required");
+  }
   return `${ADAPTER_NAME}:${Buffer.from(businessId).toString("base64url")}`;
+}
+
+/** Decode a channel ID produced by {@link encodeChannelId}. */
+export function decodeChannelId(channelId: string): string {
+  const parts = channelId.split(":");
+  if (parts.length !== 2 || parts[0] !== ADAPTER_NAME) {
+    throw new ValidationError(ADAPTER_NAME, `Invalid TikTok channel ID: ${channelId}`);
+  }
+
+  const businessId = Buffer.from(parts[1] as string, "base64url").toString();
+
+  // Same canonicality check as thread IDs: base64url decoding discards invalid
+  // characters, so a corrupted ID would otherwise decode to a plausible value.
+  if (!businessId || encodeChannelId(businessId) !== channelId) {
+    throw new ValidationError(ADAPTER_NAME, `Invalid TikTok channel ID: ${channelId}`);
+  }
+
+  return businessId;
 }

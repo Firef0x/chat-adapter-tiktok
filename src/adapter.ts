@@ -6,10 +6,14 @@ import type {
   EmojiValue,
   FetchOptions,
   FetchResult,
+  ChannelInfo,
   FormattedContent,
+  ListThreadsOptions,
+  ListThreadsResult,
   Logger,
   RawMessage,
   ThreadInfo,
+  ThreadSummary,
   WebhookOptions,
 } from "chat";
 import { ConsoleLogger, Message, NotImplementedError } from "chat";
@@ -20,6 +24,7 @@ import { TikTokFormatConverter } from "./lib/format-converter.js";
 import {
   ADAPTER_NAME,
   channelIdFromThreadId,
+  decodeChannelId,
   decodeThreadId,
   encodeThreadId,
 } from "./lib/thread-id.js";
@@ -28,6 +33,9 @@ import { TikTokTokenManager } from "./lib/token-manager.js";
 import { SIGNATURE_HEADER, verifyWebhookSignature } from "./lib/webhook.js";
 import type {
   TikTokAdapterConfig,
+  TikTokBusinessProfile,
+  TikTokConversationListData,
+  TikTokConversationType,
   TikTokMessageContent,
   TikTokMessageListData,
   TikTokRawMessage,
@@ -40,6 +48,14 @@ import type {
 
 /** TikTok rejects text longer than this outright. */
 const MAX_TEXT_LENGTH = 6000;
+
+/**
+ * Conversations listed per page by default.
+ *
+ * Kept small because `listThreads` issues one extra request per conversation,
+ * and TikTok's rate limit is per app rather than per account.
+ */
+const DEFAULT_THREAD_PAGE_SIZE = 20;
 
 /** Credentials without which the adapter cannot do anything useful. */
 const REQUIRED_CREDENTIALS = [
@@ -603,6 +619,131 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       channelId: this.channelIdFromThreadId(threadId),
       isDM: true,
       metadata: {},
+    };
+  }
+
+  /**
+   * List the account's conversations.
+   *
+   * This is the cheap listing: one call per page, returning identifiers and
+   * update times without message content. Prefer it over {@link listThreads}
+   * when the conversation IDs are all you need, since `listThreads` must fetch
+   * each conversation's messages to satisfy the Chat SDK contract.
+   *
+   * TikTok covers only the last 90 days and caps a page at 100.
+   */
+  async listConversations(options?: {
+    cursor?: number;
+    limit?: number;
+    conversationType?: TikTokConversationType;
+  }): Promise<TikTokConversationListData> {
+    return this.api.request<TikTokConversationListData>({
+      method: "GET",
+      path: "business/message/conversation/list/",
+      query: {
+        business_id: this.config.businessId,
+        conversation_type: options?.conversationType ?? "SINGLE",
+        cursor: options?.cursor,
+        limit: options?.limit,
+      },
+    });
+  }
+
+  /**
+   * List conversations as Chat SDK thread summaries.
+   *
+   * `ThreadSummary` requires a `rootMessage`, which TikTok's conversation list
+   * does not return — so this costs **one additional request per
+   * conversation**. The default limit is deliberately small because of that,
+   * and because TikTok's rate limit is per app rather than per account. Use
+   * {@link listConversations} when the identifiers alone would do.
+   *
+   * A conversation whose messages cannot be read is skipped rather than
+   * failing the page: one inaccessible thread should not hide the rest.
+   */
+  async listThreads(
+    channelId: string,
+    options?: ListThreadsOptions,
+  ): Promise<ListThreadsResult<TikTokRawMessage>> {
+    const businessId = decodeChannelId(channelId);
+    if (businessId !== this.config.businessId) {
+      throw new ValidationError(
+        ADAPTER_NAME,
+        `This adapter is connected to a different business account than ${channelId}.`,
+      );
+    }
+
+    const limit = options?.limit ?? DEFAULT_THREAD_PAGE_SIZE;
+    const page = await this.listConversations({
+      cursor: options?.cursor ? Number(options.cursor) : undefined,
+      limit,
+    });
+
+    const threads: Array<ThreadSummary<TikTokRawMessage>> = [];
+
+    for (const conversation of page.conversations ?? []) {
+      const threadId = this.encodeThreadId({
+        businessId: this.config.businessId,
+        conversationId: conversation.conversation_id,
+      });
+
+      let rootMessage: Message<TikTokRawMessage> | undefined;
+      try {
+        // Sequential on purpose. Promise.all would fire one request per
+        // conversation at once, and TikTok rate-limits per app — so the
+        // parallel version would trip 40100 on exactly the pages large enough
+        // to be worth listing.
+        // oxlint-disable-next-line no-await-in-loop
+        const { messages } = await this.fetchMessages(threadId, { limit: 1 });
+        rootMessage = messages[0];
+      } catch (error) {
+        this.logger.warn("Could not read a TikTok conversation while listing", {
+          error,
+        });
+        continue;
+      }
+
+      if (rootMessage) {
+        threads.push({
+          id: threadId,
+          rootMessage,
+          lastReplyAt: toDate(conversation.update_time),
+        });
+      }
+    }
+
+    return {
+      threads,
+      nextCursor: page.has_more ? String(page.cursor) : undefined,
+    };
+  }
+
+  /**
+   * Fetch the business account's profile.
+   *
+   * The channel is the business account itself — TikTok direct messages have
+   * no other grouping — so this returns the account's own name and avatar.
+   */
+  async fetchChannelInfo(channelId: string): Promise<ChannelInfo> {
+    const businessId = decodeChannelId(channelId);
+
+    const profile = await this.api.request<TikTokBusinessProfile>({
+      method: "GET",
+      path: "business/get/",
+      query: {
+        business_id: businessId,
+        fields: JSON.stringify(["username", "display_name", "profile_image"]),
+      },
+    });
+
+    return {
+      id: channelId,
+      name: profile.display_name ?? profile.username,
+      isDM: true,
+      metadata: {
+        username: profile.username,
+        profileImage: profile.profile_image,
+      },
     };
   }
 

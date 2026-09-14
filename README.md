@@ -122,12 +122,29 @@ resulting tokens through config and it manages the refresh cycle from there.
 | Webhook verification | ✅ | HMAC-SHA256 over the raw body, fails closed |
 | Deduplication | ✅ | Survives retries and suppresses self-echoes |
 | Message history | ⚠️ | The 20 most recent messages; TikTok offers no pagination |
+| Listing conversations | ✅ | `listConversations()` is cheap; `listThreads()` costs one request per conversation |
+| Channel info | ✅ | `fetchChannelInfo()` returns the business account's profile |
 | Images and media | ❌ | Planned for v0.2. Inbound media arrives as a placeholder |
 | Reactions | ❌ | No platform API; throws `NotImplementedError` |
 | Edit and delete | ❌ | No platform API; throws `NotImplementedError` |
 | Group threads | ❌ | TikTok direct messages are 1:1 only |
 | Starting a conversation | ❌ | Not permitted by the platform |
 | Streaming | ❌ | No platform API |
+
+### Listing conversations
+
+`listConversations()` returns TikTok's raw conversation list — identifiers and
+update times — in a single request, and is the right call when the IDs are all
+you need.
+
+`listThreads()` satisfies the Chat SDK contract instead, which requires a root
+message per thread. TikTok's conversation list carries no message content, so
+that costs **one extra request per conversation**; the default page is 20 for
+that reason, and a conversation that cannot be read is skipped rather than
+failing the whole page.
+
+Both cover only the last 90 days, which is TikTok's retention for this
+endpoint.
 
 ### Cards and buttons
 

@@ -78,6 +78,17 @@ a trailing slash**; omitting it produces a 404.
 | Check conversation capability | GET | `/business/message/capabilities/get/` |
 | Business account profile | GET | `/business/get/` |
 
+Conversation listing deserves a note, because the Chat SDK contract and the
+platform disagree. `ThreadSummary` requires a `rootMessage`, and TikTok's
+conversation list returns identifiers and timestamps with no message content —
+so `listThreads` has to fetch each conversation's history, one request per
+conversation. Rather than hide that cost or fabricate a placeholder message,
+the adapter exposes both: `listConversations` for the cheap single-request
+listing, and `listThreads` for hosts that need the SDK shape and accept the
+fan-out. The default page size is small for the same reason, and the fetches
+run sequentially because TikTok rate-limits per app, so a parallel burst would
+trip `40100` on exactly the pages large enough to matter.
+
 Three auth schemes coexist, which the HTTP client must keep straight:
 
 - Messaging endpoints use a custom `Access-Token: <token>` header.

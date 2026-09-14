@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { channelIdFromThreadId, decodeThreadId, encodeThreadId } from "../../src/lib/thread-id.js";
+import {
+  channelIdFromThreadId,
+  decodeChannelId,
+  decodeThreadId,
+  encodeChannelId,
+  encodeThreadId,
+} from "../../src/lib/thread-id.js";
 
 describe("thread IDs", () => {
   it("round-trips a business and conversation pair", () => {
@@ -62,5 +68,37 @@ describe("thread IDs", () => {
     expect(() => encodeThreadId({ businessId: "biz_123", conversationId: "" })).toThrow(
       /conversationId is required/,
     );
+  });
+});
+
+describe("channel IDs", () => {
+  it("round-trips a business account", () => {
+    expect(decodeChannelId(encodeChannelId("biz_123"))).toBe("biz_123");
+  });
+
+  it("matches the channel derived from a thread ID", () => {
+    const threadId = encodeThreadId({
+      businessId: "biz_123",
+      conversationId: "conv_456",
+    });
+    expect(channelIdFromThreadId(threadId)).toBe(encodeChannelId("biz_123"));
+  });
+
+  it.each([
+    ["wrong adapter", "slack:Yml6XzEyMw"],
+    ["too many segments", "tiktok:Yml6XzEyMw:extra"],
+    ["empty", ""],
+  ])("rejects a malformed channel ID (%s)", (_label, channelId) => {
+    expect(() => decodeChannelId(channelId)).toThrow(/Invalid TikTok channel ID/);
+  });
+
+  it("rejects trailing junk instead of decoding it away", () => {
+    expect(() => decodeChannelId(`${encodeChannelId("biz_123")}$$$`)).toThrow(
+      /Invalid TikTok channel ID/,
+    );
+  });
+
+  it("rejects encoding an empty business ID", () => {
+    expect(() => encodeChannelId("")).toThrow(/businessId is required/);
   });
 });

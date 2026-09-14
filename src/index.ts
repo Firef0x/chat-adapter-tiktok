@@ -10,7 +10,13 @@ export {
 export { cardToPlainText } from "./lib/card-to-text.js";
 export { TikTokFormatConverter } from "./lib/format-converter.js";
 export { cardToTemplate, TEMPLATE_LIMITS } from "./lib/template.js";
-export { channelIdFromThreadId, decodeThreadId, encodeThreadId } from "./lib/thread-id.js";
+export {
+  channelIdFromThreadId,
+  decodeChannelId,
+  decodeThreadId,
+  encodeChannelId,
+  encodeThreadId,
+} from "./lib/thread-id.js";
 export { TikTokTokenManager, type TokenManagerOptions } from "./lib/token-manager.js";
 export {
   type ParsedSignature,
@@ -24,6 +30,7 @@ export { TIKTOK_CODE, TIKTOK_MESSAGING_SCOPES } from "./types.js";
 export type {
   TikTokAdapterConfig,
   TikTokApiEnvelope,
+  TikTokBusinessProfile,
   TikTokCapabilityData,
   TikTokCode,
   TikTokContentBase,

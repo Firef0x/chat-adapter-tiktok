@@ -359,6 +359,18 @@ export interface TikTokRestMessage {
   share_post?: { embed_url?: string; video_id?: string };
 }
 
+/**
+ * Response data for `GET /business/get/`.
+ *
+ * The requested `fields` decide which keys come back; `display_name` and
+ * `profile_image` are the documented defaults.
+ */
+export interface TikTokBusinessProfile {
+  display_name?: string;
+  profile_image?: string;
+  username?: string;
+}
+
 /** Per-conversation capability probe, e.g. whether images may be sent. */
 export interface TikTokCapabilityData {
   capability_infos: Array<{

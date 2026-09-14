@@ -758,6 +758,175 @@ describe("TikTokAdapter", () => {
     });
   });
 
+  describe("listConversations", () => {
+    it("requests the conversation list with sane defaults", async () => {
+      const listFetch = vi.fn(async () =>
+        okResponse({ conversations: [], has_more: false, cursor: 0 }),
+      );
+      const { adapter: local } = build(listFetch);
+
+      await local.listConversations();
+
+      const url = listFetch.mock.calls[0]?.[0] as string;
+      expect(url).toContain("business/message/conversation/list/");
+      expect(url).toContain("conversation_type=SINGLE");
+      expect(url).toContain(`business_id=${BUSINESS_ID}`);
+    });
+
+    it("returns TikTok's paging fields untouched", async () => {
+      const listFetch = vi.fn(async () =>
+        okResponse({
+          conversations: [{ conversation_id: "c1", update_time: 1000 }],
+          has_more: true,
+          cursor: 42,
+        }),
+      );
+      const { adapter: local } = build(listFetch);
+
+      await expect(local.listConversations()).resolves.toMatchObject({
+        has_more: true,
+        cursor: 42,
+      });
+    });
+  });
+
+  describe("listThreads", () => {
+    function channelId(local: TikTokAdapter) {
+      return local.channelIdFromThreadId(
+        local.encodeThreadId({
+          businessId: BUSINESS_ID,
+          conversationId: CONVERSATION_ID,
+        }),
+      );
+    }
+
+    it("builds a summary per conversation, fetching each root message", async () => {
+      // ThreadSummary requires a rootMessage the conversation list does not
+      // return, so this necessarily costs one extra request per conversation.
+      const listAndHistory = vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({
+            conversations: [
+              { conversation_id: "c1", update_time: 1000 },
+              { conversation_id: "c2", update_time: 2000 },
+            ],
+            has_more: false,
+            cursor: 0,
+          }),
+        )
+        .mockResolvedValue(okResponse({ messages: [restMessage()], participants: [] }));
+      const { adapter: local } = build(listAndHistory);
+
+      const result = await local.listThreads(channelId(local));
+
+      expect(result.threads).toHaveLength(2);
+      expect(result.threads[0]?.rootMessage.text).toBe("from history");
+      expect(result.threads[0]?.lastReplyAt?.getTime()).toBe(1000);
+      expect(listAndHistory).toHaveBeenCalledTimes(3); // one list + two histories
+      expect(result.nextCursor).toBeUndefined();
+    });
+
+    it("surfaces the cursor only when TikTok reports more pages", async () => {
+      const listAndHistory = vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({
+            conversations: [{ conversation_id: "c1", update_time: 1000 }],
+            has_more: true,
+            cursor: 7,
+          }),
+        )
+        .mockResolvedValue(okResponse({ messages: [restMessage()], participants: [] }));
+      const { adapter: local } = build(listAndHistory);
+
+      await expect(local.listThreads(channelId(local))).resolves.toMatchObject({
+        nextCursor: "7",
+      });
+    });
+
+    it("skips a conversation it cannot read rather than failing the page", async () => {
+      const listAndHistory = vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({
+            conversations: [
+              { conversation_id: "c1", update_time: 1000 },
+              { conversation_id: "c2", update_time: 2000 },
+            ],
+            has_more: false,
+            cursor: 0,
+          }),
+        )
+        .mockResolvedValueOnce(errorResponse(TIKTOK_CODE.NO_PERMISSION))
+        .mockResolvedValue(okResponse({ messages: [restMessage()], participants: [] }));
+      const { adapter: local } = build(listAndHistory);
+
+      const result = await local.listThreads(channelId(local));
+
+      expect(result.threads).toHaveLength(1);
+    });
+
+    it("refuses a channel belonging to a different business account", async () => {
+      const { adapter: local } = build();
+      const foreign = local.channelIdFromThreadId(
+        local.encodeThreadId({
+          businessId: "someone_else",
+          conversationId: CONVERSATION_ID,
+        }),
+      );
+
+      await expect(local.listThreads(foreign)).rejects.toBeInstanceOf(ValidationError);
+    });
+  });
+
+  describe("fetchChannelInfo", () => {
+    it("returns the business account's profile", async () => {
+      const profileFetch = vi.fn(async () =>
+        okResponse({
+          display_name: "Acme Co",
+          username: "acmeco",
+          profile_image: "https://example.com/a.png",
+        }),
+      );
+      const { adapter: local } = build(profileFetch);
+      const channelId = local.channelIdFromThreadId(
+        local.encodeThreadId({
+          businessId: BUSINESS_ID,
+          conversationId: CONVERSATION_ID,
+        }),
+      );
+
+      const info = await local.fetchChannelInfo(channelId);
+
+      expect(info.name).toBe("Acme Co");
+      expect(info.id).toBe(channelId);
+      expect(info.metadata).toMatchObject({ username: "acmeco" });
+      expect(profileFetch.mock.calls[0]?.[0]).toContain("business/get/");
+    });
+
+    it("falls back to the username when no display name is set", async () => {
+      const { adapter: local } = build(vi.fn(async () => okResponse({ username: "acmeco" })));
+      const channelId = local.channelIdFromThreadId(
+        local.encodeThreadId({
+          businessId: BUSINESS_ID,
+          conversationId: CONVERSATION_ID,
+        }),
+      );
+
+      await expect(local.fetchChannelInfo(channelId)).resolves.toMatchObject({
+        name: "acmeco",
+      });
+    });
+
+    it("rejects a malformed channel ID", async () => {
+      const { adapter: local } = build();
+      await expect(local.fetchChannelInfo("tiktok:not-canonical!")).rejects.toThrow(
+        /Invalid TikTok channel ID/,
+      );
+    });
+  });
+
   describe("unsupported operations", () => {
     it.each([
       ["addReaction", () => adapter.addReaction("t", "m", "👍")],

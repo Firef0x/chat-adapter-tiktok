@@ -35,7 +35,6 @@ platform feasibility.
 - Anything requiring live credentials: end-to-end verification, onboarding
   flows, production Go/No-Go evidence. That is step 1 and is explicitly
   deferred.
-- Image, video, and other attachments. Deferred to v0.2 (see Deferred Scope).
 - Comment-to-DM automation. TikTok exposes no comment webhook, so this is not
   buildable on the official API.
 - Wiring the adapter into a host application's control plane (channel registry,

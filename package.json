@@ -2,7 +2,28 @@
   "name": "chat-adapter-tiktok",
   "version": "0.1.0",
   "description": "TikTok Business Messaging adapter for Chat SDK",
+  "keywords": [
+    "adapter",
+    "bot",
+    "chat",
+    "chat-adapter",
+    "chat-sdk",
+    "messaging",
+    "tiktok",
+    "tiktok-business-messaging"
+  ],
+  "homepage": "https://github.com/Firef0x/chat-adapter-tiktok#readme",
+  "bugs": {
+    "url": "https://github.com/Firef0x/chat-adapter-tiktok/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firef0x/chat-adapter-tiktok.git"
+  },
+  "license": "Apache-2.0",
+  "author": "Firef0x <firefgx@gmail.com>",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -23,10 +44,14 @@
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
-    "clean": "rm -rf dist"
+    "lint": "oxlint && oxfmt --check .",
+    "format": "oxfmt .",
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "clean": "rm -rf dist coverage",
+    "prepublishOnly": "npm run verify"
   },
   "peerDependencies": {
-    "chat": ">=4.40.0"
+    "chat": "^4.40.0"
   },
   "dependencies": {
     "@chat-adapter/shared": "^4.40.0"
@@ -35,6 +60,8 @@
     "@types/node": "^26.5.1",
     "@vitest/coverage-v8": "^4.0.0",
     "chat": "^4.40.0",
+    "oxfmt": "^0.67.0",
+    "oxlint": "^1.82.0",
     "tsup": "^8.5.1",
     "typescript": "~5.9.3",
     "vitest": "^4.0.0"
@@ -42,17 +69,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "keywords": [
-    "adapter",
-    "bot",
-    "chat",
-    "chat-adapter",
-    "chat-sdk",
-    "messaging",
-    "tiktok",
-    "tiktok-business-messaging"
-  ],
-  "license": "Apache-2.0",
   "engines": {
     "node": ">=20"
   },

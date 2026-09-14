@@ -1,51 +1,44 @@
 # chat-adapter-tiktok
 
-TikTok Business Messaging adapter for [Chat SDK](https://chat-sdk.dev).
+[![npm version](https://img.shields.io/npm/v/chat-adapter-tiktok)](https://www.npmjs.com/package/chat-adapter-tiktok)
+[![npm downloads](https://img.shields.io/npm/dm/chat-adapter-tiktok)](https://www.npmjs.com/package/chat-adapter-tiktok)
+[![license](https://img.shields.io/npm/l/chat-adapter-tiktok)](./LICENSE)
+
+TikTok Business Messaging adapter for [Chat SDK](https://chat-sdk.dev/docs).
 
 Bridges TikTok direct messages into the platform-agnostic Chat SDK `Adapter`
 interface, so your bot code stays the same whether it is talking to Slack,
 WhatsApp, or TikTok.
 
-> **Status: work in progress.** The package is under active development and has
-> not been verified end to end against live TikTok credentials. See
-> [Limitations](#limitations) before depending on it.
+> **Status: pre-release.** Every path is unit-tested against mocked HTTP, but
+> the package has not yet been verified end to end against live TikTok
+> credentials. Read [Limitations](#limitations) before depending on it.
 
 ## Installation
 
 ```bash
-npm install chat-adapter-tiktok chat
+npm install chat chat-adapter-tiktok
 ```
 
 `chat` is a peer dependency — the adapter runs inside your Chat instance.
-
-## Requirements
-
-- A **verified TikTok Business Account**. Personal accounts cannot use the
-  Business Messaging API.
-- A TikTok developer app with **Business Messaging API** access approved, giving
-  you an app ID, app secret, and the OAuth credentials for a connected account.
-  The messaging scopes are `message.list.read`, `message.list.send`, and
-  `message.list.manage`. The `business_id` used throughout the API is the
-  `open_id` returned by the OAuth token exchange.
-- A publicly reachable HTTPS endpoint for webhooks.
 
 ## Usage
 
 ```typescript
 import { Chat } from "chat";
-import { tiktok } from "chat-adapter-tiktok";
+import { createTikTokAdapter } from "chat-adapter-tiktok";
 
 const chat = new Chat({
-  adapter: tiktok({
+  adapter: createTikTokAdapter({
     appId: process.env.TIKTOK_APP_ID,
     appSecret: process.env.TIKTOK_APP_SECRET,
     businessId: process.env.TIKTOK_BUSINESS_ID,
     accessToken: process.env.TIKTOK_ACCESS_TOKEN,
     refreshToken: process.env.TIKTOK_REFRESH_TOKEN,
 
-    // TikTok access tokens expire in ~24 hours. The adapter refreshes them
-    // automatically and hands the new credentials back here so you can persist
-    // them — otherwise they are lost when the process restarts.
+    // TikTok access tokens last 24 hours and the refresh token rotates on
+    // every use. The adapter refreshes automatically and hands the new
+    // credentials back here — persist them, or a restart loses the connection.
     onTokenRefresh: async (tokens) => {
       await db.saveTikTokTokens(tokens);
     },
@@ -65,52 +58,86 @@ export async function POST(request: Request) {
 }
 ```
 
-## Token lifecycle
+`tiktok` is exported as a shorthand alias for `createTikTokAdapter`.
 
-TikTok issues short-lived credentials, which is the main operational difference
-from most other chat platforms:
+## Environment variables
 
-| Credential | Lifetime | Behavior |
+Every credential can be passed in config or read from the environment. Config
+takes precedence; a missing credential throws at construction rather than
+surfacing later as an opaque API rejection.
+
+| Variable | Required | Description |
 |---|---|---|
-| Access token | 24 hours | Refreshed automatically before expiry |
-| Refresh token | 1 year, **rotates on every refresh** | Requires the operator to re-authorize once it expires |
+| `TIKTOK_APP_ID` | Yes | App ID from the TikTok developer portal |
+| `TIKTOK_APP_SECRET` | Yes | App secret. Also verifies webhook signatures |
+| `TIKTOK_BUSINESS_ID` | Yes | The connected account's `open_id` |
+| `TIKTOK_ACCESS_TOKEN` | Yes | Current access token |
+| `TIKTOK_REFRESH_TOKEN` | Yes | Current refresh token |
 
-The refresh token changes every time it is used. If you do not persist the new
-value from `onTokenRefresh`, the old one stops working and the connection can
-only be recovered by completing OAuth again.
+## Configuration
 
-When the refresh token expires or is revoked, the adapter throws an
-`AuthenticationError`. Treat this as "the connection needs re-authorization"
-rather than a transient failure — retrying will not fix it.
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `appId` | `string` | — | App ID. Sent as `client_id` on the token endpoints |
+| `appSecret` | `string` | — | App secret, and the webhook signing key |
+| `businessId` | `string` | — | The `open_id` returned by the OAuth exchange; required on every API call |
+| `accessToken` | `string` | — | Current access token |
+| `refreshToken` | `string` | — | Current refresh token |
+| `accessTokenExpiresAt` | `number` | treated as expired | Expiry in epoch milliseconds. Omitting it forces one refresh up front |
+| `refreshTokenExpiresAt` | `number` | unknown | Expiry in epoch milliseconds. Supplying it lets the adapter fail fast with a clear re-authorize error |
+| `onTokenRefresh` | `(tokens) => void \| Promise<void>` | — | Called with rotated credentials. Persist them |
+| `useTemplates` | `boolean` | `true` | Send fitting cards as native Q&A button cards. Set `false` to always send plain text |
+| `userName` | `string` | `"tiktok-bot"` | Display name for the bot |
+| `signatureToleranceSeconds` | `number` | `5` | Permitted webhook timestamp drift. This is what prevents replay |
+| `apiVersion` | `string` | `"v1.3"` | API version segment |
+| `baseUrl` | `string` | TikTok's host | Override the API host. Intended for testing |
+| `logger` | `Logger` | Chat SDK's | Logger override |
 
-## Limitations
+## Platform setup
 
-These come from the TikTok platform, not from this adapter:
+1. Create a **verified TikTok Business Account**. Personal accounts cannot use
+   the Business Messaging API.
+2. Register an app in the TikTok developer portal and apply for
+   **Business Messaging API** access.
+3. Request the messaging scopes: `message.list.read`, `message.list.send`, and
+   `message.list.manage`.
+4. Complete the OAuth flow for the business account. The token response's
+   `open_id` is the `business_id` used everywhere else in the API — there is no
+   separate business ID field.
+5. Register a publicly reachable HTTPS webhook URL and subscribe to the
+   `im_receive_msg` and `im_send_msg` events.
 
-- **You cannot start a conversation.** Every conversation begins with the user,
-  a tiktok.me link, or a Click-to-Message ad. There is no "open a DM" API.
-- **48-hour messaging windows.** For non-mutual-follow conversations: up to 10
-  messages in the 48 hours after the user's first message; unlimited messages
-  for 48 hours after each subsequent user reply; and at most 3 further messages
-  once 48 hours have passed without a reply.
-- **Not available in the EEA, Switzerland, or the UK.** Accounts registered in
-  those regions cannot use the Business Messaging API.
-- **No comment webhook.** You cannot trigger a DM from a comment on an organic
-  post.
-- **1:1 conversations only.** There are no group threads.
-- **Text only in this release.** Image attachments are planned for v0.2.
-  Inbound images, stickers, and videos arrive as a visible placeholder such as
-  `[image]` rather than as empty text.
+This adapter does not perform the authorization-code exchange; supply the
+resulting tokens through config and it manages the refresh cycle from there.
+
+## Features
+
+| Feature | Support | Notes |
+|---|---|---|
+| Inbound text | ✅ | |
+| Outbound text | ✅ | Up to 6000 characters, checked before sending |
+| Cards and buttons | ✅ | Native Q&A button card, with a plain-text fallback |
+| Typing indicator | ✅ | Via `SENDER_ACTION` |
+| Read receipts | ✅ | `markAsRead()`, via `SENDER_ACTION` |
+| Webhook verification | ✅ | HMAC-SHA256 over the raw body, fails closed |
+| Deduplication | ✅ | Survives retries and suppresses self-echoes |
+| Message history | ⚠️ | The 20 most recent messages; TikTok offers no pagination |
+| Images and media | ❌ | Planned for v0.2. Inbound media arrives as a placeholder |
+| Reactions | ❌ | No platform API; throws `NotImplementedError` |
+| Edit and delete | ❌ | No platform API; throws `NotImplementedError` |
+| Group threads | ❌ | TikTok direct messages are 1:1 only |
+| Starting a conversation | ❌ | Not permitted by the platform |
+| Streaming | ❌ | No platform API |
 
 ### Cards and buttons
 
-A card with a short question and one to three plain buttons is sent as a
-TikTok **Q&A button card**, which renders as real tappable buttons. When the
-user taps one, TikTok delivers their choice as a normal text message.
+A card with a short question and one to three plain buttons is sent as a TikTok
+**Q&A button card**, which renders as real tappable buttons. When the user taps
+one, TikTok delivers their choice as a normal text message.
 
-Anything that does not fit that shape degrades to plain text rather than being
-dropped — more than three buttons, a button label over 20 characters, a
-question over 40, or a card carrying link buttons or select options:
+Anything that does not fit degrades to plain text rather than being dropped —
+more than three buttons, a button label over 20 characters, a question over 40,
+or a card carrying link buttons or select options:
 
 ```
 Order status
@@ -124,25 +151,53 @@ out either way, since TikTok cannot show a disabled state and an unselectable
 option is worse than an absent one. Inbound template messages are rendered the
 same way.
 
-Set `useTemplates: false` to always send plain text, if your account rejects
-template messages.
-- **Reactions, edits, and deletes are unsupported** by the platform API. Chat
-  SDK requires these methods on every adapter, so they are present but throw
-  `NotImplementedError` rather than failing silently.
+Set `useTemplates: false` to always send plain text.
 
-Typing indicators and read receipts *are* supported, through TikTok's
-`SENDER_ACTION` message type — `startTyping()` and `markAsRead()` both work.
+## Token lifecycle
+
+TikTok issues short-lived credentials, which is the main operational difference
+from most other chat platforms:
+
+| Credential | Lifetime | Behavior |
+|---|---|---|
+| Access token | 24 hours | Refreshed automatically before expiry |
+| Refresh token | 1 year, **rotates on every refresh** | Requires re-authorization once it expires |
+
+The refresh token changes every time it is used. If you do not persist the new
+value from `onTokenRefresh`, the old one stops working and the connection can
+only be recovered by completing OAuth again.
+
+When the refresh token expires or is revoked, the adapter throws an
+`AuthenticationError`. Treat that as "this connection needs re-authorization"
+rather than a transient failure — retrying will not fix it.
+
+## Limitations
+
+These come from the TikTok platform, not from this adapter:
+
+- **You cannot start a conversation.** Every conversation begins with the user,
+  a tiktok.me link, or a Click-to-Message ad. There is no "open a DM" API.
+- **48-hour messaging windows.** For non-mutual-follow conversations: up to 10
+  messages in the 48 hours after the user's first message; unlimited messages
+  for 48 hours after each subsequent user reply; and at most 3 further messages
+  once 48 hours have passed without a reply.
+- **Not available in the EEA, Switzerland, or the UK.** Accounts in those
+  regions emit a stripped event carrying no message content, so a bot cannot
+  reply to them.
+- **No comment webhook.** You cannot trigger a DM from a comment on a post.
+- **1:1 conversations only.** There are no group threads.
+- **Reactions, edits, and deletes are unsupported.** Chat SDK requires these
+  methods on every adapter, so they are present but throw `NotImplementedError`
+  rather than failing silently.
 
 ## Development
 
 ```bash
 npm install
-npm run typecheck
-npm run build
-npm test
+npm run verify   # lint, typecheck, test, build
 ```
 
-Tests mock all HTTP, so no TikTok credentials are needed to run them.
+Tests mock all HTTP, so no TikTok credentials are required to run them.
 
 ## License
 

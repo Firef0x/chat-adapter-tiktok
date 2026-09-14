@@ -142,6 +142,7 @@ src/
     format-converter.ts postable content -> plain text
     card-to-text.ts     card flattening, buttons included
     template.ts         card -> native Q&A button card, or null
+    oauth.ts            authorize URL and authorization-code exchange
 __tests__/              mirrors src/, all HTTP mocked
 ```
 
@@ -350,7 +351,7 @@ Steps are numbered as in the parent investigation.
 | 1 | TikTok developer app, API approval, test accounts | Deferred — blocked on external approval |
 | 2 | Package scaffold | Done |
 | 3 | `types.ts` | Done |
-| 4 | OAuth and token manager | Refresh leg done; the authorization-code exchange is not implemented — the host performs the initial OAuth and supplies the resulting tokens |
+| 4 | OAuth and token manager | Done, both legs: `lib/oauth.ts` builds the authorize URL and exchanges the code, and the token manager owns the refresh cycle |
 | 5 | `TikTokAdapter` class | Done |
 | 6 | Format converter | Done, including native Q&A button cards; media pending v0.2 |
 | 7 | README, publish, directory listing | README done; publishing and the directory listing pending |

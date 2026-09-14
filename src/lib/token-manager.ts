@@ -10,6 +10,7 @@ import {
   TIKTOK_API_HOST,
   TIKTOK_DEFAULT_API_VERSION,
 } from "./api-client.js";
+import { toTokens } from "./oauth.js";
 import { ADAPTER_NAME } from "./thread-id.js";
 
 /**
@@ -220,33 +221,15 @@ export class TikTokTokenManager implements AccessTokenProvider {
    * handed, and would persist, an `undefined` refresh token over its good one.
    */
   private applyTokenResponse(data: TikTokTokenResponse): void {
-    const missing: string[] = [];
-    if (!data?.access_token) {
-      missing.push("access_token");
-    }
-    if (!data?.refresh_token) {
-      missing.push("refresh_token");
-    }
-    if (!Number.isFinite(data?.expires_in)) {
-      missing.push("expires_in");
-    }
-    if (!Number.isFinite(data?.refresh_token_expires_in)) {
-      missing.push("refresh_token_expires_in");
-    }
+    // Shares the OAuth module's validation so the exchange and refresh legs
+    // cannot drift apart in what they consider a usable response.
+    const tokens = toTokens(data, this.now(), this.options.businessId);
 
-    if (missing.length > 0) {
-      throw new NetworkError(
-        ADAPTER_NAME,
-        `TikTok returned an incomplete token response (missing or invalid: ${missing.join(", ")}). The existing credentials were kept.`,
-      );
-    }
-
-    const now = this.now();
-    this.accessToken = data.access_token;
-    this.refreshToken = data.refresh_token;
-    this.accessTokenExpiresAt = now + data.expires_in * 1000;
-    this.refreshTokenExpiresAt = now + data.refresh_token_expires_in * 1000;
-    this.scopes = data.scope ? data.scope.split(",") : [];
+    this.accessToken = tokens.accessToken;
+    this.refreshToken = tokens.refreshToken;
+    this.accessTokenExpiresAt = tokens.accessTokenExpiresAt;
+    this.refreshTokenExpiresAt = tokens.refreshTokenExpiresAt;
+    this.scopes = tokens.scopes;
   }
 
   private async notifyHost(): Promise<void> {

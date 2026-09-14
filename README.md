@@ -101,14 +101,50 @@ surfacing later as an opaque API rejection.
    **Business Messaging API** access.
 3. Request the messaging scopes: `message.list.read`, `message.list.send`, and
    `message.list.manage`.
-4. Complete the OAuth flow for the business account. The token response's
-   `open_id` is the `business_id` used everywhere else in the API — there is no
-   separate business ID field.
+4. Complete the OAuth flow for the business account — see
+   [Authorization](#authorization) below.
 5. Register a publicly reachable HTTPS webhook URL and subscribe to the
    `im_receive_msg` and `im_send_msg` events.
 
-This adapter does not perform the authorization-code exchange; supply the
-resulting tokens through config and it manages the refresh cycle from there.
+## Authorization
+
+Send the operator to TikTok, then exchange the code it returns:
+
+```typescript
+import { buildAuthorizeUrl, exchangeAuthCode } from "chat-adapter-tiktok";
+
+// 1. Redirect the operator here.
+const url = buildAuthorizeUrl({
+  appId: process.env.TIKTOK_APP_ID,
+  redirectUri: "https://example.com/tiktok/callback",
+  state: csrfToken,
+});
+
+// 2. On the callback, trade the code for credentials.
+const tokens = await exchangeAuthCode({
+  appId: process.env.TIKTOK_APP_ID,
+  appSecret: process.env.TIKTOK_APP_SECRET,
+  authCode: new URL(request.url).searchParams.get("code"),
+  redirectUri: "https://example.com/tiktok/callback",
+});
+
+// 3. `tokens` is shaped for the adapter config.
+const adapter = createTikTokAdapter({
+  appId: process.env.TIKTOK_APP_ID,
+  appSecret: process.env.TIKTOK_APP_SECRET,
+  ...tokens,
+});
+```
+
+The authorization code is **single-use and expires after ten minutes**, so
+exchange it on the callback rather than queueing the work.
+
+`businessId` comes from the response's `open_id` — the same value under a
+different name, and the one every messaging call needs.
+
+Note TikTok names the app `client_key` on the authorize URL but `client_id` on
+the token endpoints; `buildAuthorizeUrl` and `exchangeAuthCode` handle that
+asymmetry for you.
 
 ## Features
 
@@ -124,6 +160,7 @@ resulting tokens through config and it manages the refresh cycle from there.
 | Message history | ⚠️ | The 20 most recent messages; TikTok offers no pagination |
 | Listing conversations | ✅ | `listConversations()` is cheap; `listThreads()` costs one request per conversation |
 | Channel info | ✅ | `fetchChannelInfo()` returns the business account's profile |
+| OAuth | ✅ | `buildAuthorizeUrl()` and `exchangeAuthCode()`, plus automatic refresh |
 | Images and media | ❌ | Planned for v0.2. Inbound media arrives as a placeholder |
 | Reactions | ❌ | No platform API; throws `NotImplementedError` |
 | Edit and delete | ❌ | No platform API; throws `NotImplementedError` |

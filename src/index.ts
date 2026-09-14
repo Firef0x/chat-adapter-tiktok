@@ -8,6 +8,13 @@ export {
   type TikTokRequest,
 } from "./lib/api-client.js";
 export { cardToPlainText } from "./lib/card-to-text.js";
+export {
+  type AuthorizeUrlOptions,
+  buildAuthorizeUrl,
+  type ExchangeCodeOptions,
+  exchangeAuthCode,
+  TIKTOK_AUTHORIZE_URL,
+} from "./lib/oauth.js";
 export { TikTokFormatConverter } from "./lib/format-converter.js";
 export { cardToTemplate, TEMPLATE_LIMITS } from "./lib/template.js";
 export {

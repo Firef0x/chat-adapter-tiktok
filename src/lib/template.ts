@@ -4,17 +4,24 @@ import type { TikTokTemplatePayload } from "../types.js";
 import { cardToPlainText } from "./card-to-text.js";
 
 /**
- * Documented limits for `QA_BUTTON_CARD` templates.
+ * Documented limits for Q&A card templates.
  *
- * A card that exceeds any of them cannot be sent as a template at all —
+ * A card that exceeds all of them cannot be sent as a template at all —
  * TikTok offers no truncation behaviour, and silently cutting a button label
  * would change what the user is agreeing to.
+ *
+ * The two card types differ only in how TikTok draws them and in how long a
+ * label may be: a button card renders tappable buttons but caps labels at 20
+ * characters, while a link card renders inline text links and allows 40.
  */
 export const TEMPLATE_LIMITS = {
   minButtons: 1,
   maxButtons: 3,
   maxTitleLength: 40,
+  /** `QA_BUTTON_CARD` label cap. */
   maxButtonTitleLength: 20,
+  /** `QA_LINK_CARD` label cap — the reason a longer label still has a home. */
+  maxLinkTitleLength: 40,
   maxButtonIdLength: 40,
 } as const;
 
@@ -59,12 +66,18 @@ export function cardToTemplate(card: CardElement): TikTokTemplatePayload | null 
       typeof button.id !== "string" ||
       button.label.length === 0 ||
       button.id.length === 0 ||
-      button.label.length > TEMPLATE_LIMITS.maxButtonTitleLength ||
+      button.label.length > TEMPLATE_LIMITS.maxLinkTitleLength ||
       button.id.length > TEMPLATE_LIMITS.maxButtonIdLength,
   );
   if (unusable) {
     return null;
   }
+
+  // Buttons render better than text links, so they are preferred whenever
+  // every label fits. A longer label is not a reason to fall back to plain
+  // text when a link card would carry it.
+  const longest = Math.max(...buttons.map((button) => button.label.length));
+  const type = longest <= TEMPLATE_LIMITS.maxButtonTitleLength ? "QA_BUTTON_CARD" : "QA_LINK_CARD";
 
   const title = buildTitle(card);
   if (!title) {
@@ -72,7 +85,7 @@ export function cardToTemplate(card: CardElement): TikTokTemplatePayload | null 
   }
 
   return {
-    type: "QA_BUTTON_CARD",
+    type,
     title,
     buttons: buttons.map((button) => ({
       type: "REPLY" as const,

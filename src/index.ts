@@ -53,6 +53,11 @@ export {
   type VerifyOptions,
 } from "./lib/webhook.js";
 export {
+  type TikTokAdapterResolver,
+  TikTokWebhookRouter,
+  type TikTokWebhookRouterOptions,
+} from "./lib/webhook-router.js";
+export {
   deleteWebhookConfig,
   getWebhookConfig,
   setWebhookConfig,

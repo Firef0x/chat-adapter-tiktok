@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import { extractCard, extractFiles, NetworkError, ValidationError } from "@chat-adapter/shared";
 import type {
   Adapter,
@@ -219,6 +221,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     // Read the raw bytes first: the HMAC covers exactly what was sent, and a
     // parsed-then-re-serialized body will not reproduce it.
     const rawBody = await request.text();
+    const logId = request.headers.get("x-tt-logid") ?? undefined;
 
     const verification = verifyWebhookSignature({
       header: request.headers.get(SIGNATURE_HEADER),
@@ -228,15 +231,34 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     });
 
     if (!verification.valid) {
-      this.logger.warn("Rejected TikTok webhook", {
-        reason: verification.reason,
-        logId: request.headers.get("x-tt-logid") ?? undefined,
-      });
+      this.logger.warn("Rejected TikTok webhook", { reason: verification.reason, logId });
       return new Response("Invalid signature", { status: 401 });
     }
 
-    const logId = request.headers.get("x-tt-logid") ?? undefined;
+    return this.handleVerifiedWebhook(rawBody, options, logId);
+  }
 
+  /**
+   * Handle a delivery whose signature has already been verified.
+   *
+   * Used by {@link TikTokWebhookRouter}, which verifies once for the whole
+   * app. Re-verifying here would look like prudence and is in fact a bug: the
+   * signature carries a timestamp checked against a five-second tolerance, and
+   * the router may have spent that budget loading a tenant. The second check
+   * would then reject a delivery the first accepted, and since that answer is
+   * not 2xx, TikTok would retry it forever.
+   *
+   * The caller is responsible for having verified against the same app secret.
+   * That is why this is not exported from the package: reaching it requires
+   * holding an adapter instance and ignoring this warning.
+   *
+   * @internal
+   */
+  async handleVerifiedWebhook(
+    rawBody: string,
+    options?: WebhookOptions,
+    logId?: string,
+  ): Promise<Response> {
     try {
       await this.processEnvelope(rawBody, options);
     } catch (error) {
@@ -247,6 +269,19 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     }
 
     return new Response("OK", { status: 200 });
+  }
+
+  /**
+   * Whether this adapter is configured for the given app secret.
+   *
+   * Lets a router refuse an adapter belonging to a different TikTok app at
+   * registration, rather than letting every one of its deliveries fail. The
+   * comparison is constant-time so it cannot be used to probe the secret.
+   */
+  usesAppSecret(appSecret: string): boolean {
+    const mine = Buffer.from(this.config.appSecret, "utf8");
+    const theirs = Buffer.from(appSecret, "utf8");
+    return mine.length === theirs.length && crypto.timingSafeEqual(mine, theirs);
   }
 
   private async processEnvelope(rawBody: string, options?: WebhookOptions): Promise<void> {

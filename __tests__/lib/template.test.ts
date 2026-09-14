@@ -59,16 +59,54 @@ describe("cardToTemplate", () => {
     expect(cardToTemplate(card("Q", buttons(TEMPLATE_LIMITS.maxButtons + 1)))).toBeNull();
   });
 
-  it("declines an over-long button label rather than truncating it", () => {
-    // Truncating would change what the user believes they are agreeing to.
-    const long = [
+  it("uses a link card when a label outgrows the button-card cap", () => {
+    // A 21-character label used to fall back to plain text, losing every
+    // button, when a link card carries labels up to 40.
+    const longish = [
       {
         type: "button" as const,
         id: "b",
         label: "x".repeat(TEMPLATE_LIMITS.maxButtonTitleLength + 1),
       },
     ];
-    expect(cardToTemplate(card("Q", long))).toBeNull();
+
+    expect(cardToTemplate(card("Q", longish))?.type).toBe("QA_LINK_CARD");
+  });
+
+  it("prefers a button card when every label fits, since buttons render better", () => {
+    expect(cardToTemplate(card("Q", buttons(2)))?.type).toBe("QA_BUTTON_CARD");
+  });
+
+  it("switches on the longest label, not the first", () => {
+    const mixed = [
+      { type: "button" as const, id: "a", label: "Short" },
+      {
+        type: "button" as const,
+        id: "b",
+        label: "x".repeat(TEMPLATE_LIMITS.maxButtonTitleLength + 1),
+      },
+    ];
+
+    expect(cardToTemplate(card("Q", mixed))?.type).toBe("QA_LINK_CARD");
+  });
+
+  it("accepts a label exactly at the button-card cap", () => {
+    const exact = [
+      { type: "button" as const, id: "b", label: "x".repeat(TEMPLATE_LIMITS.maxButtonTitleLength) },
+    ];
+    expect(cardToTemplate(card("Q", exact))?.type).toBe("QA_BUTTON_CARD");
+  });
+
+  it("declines a label beyond even the link-card cap rather than truncating", () => {
+    // Truncating would change what the user believes they are agreeing to.
+    const tooLong = [
+      {
+        type: "button" as const,
+        id: "b",
+        label: "x".repeat(TEMPLATE_LIMITS.maxLinkTitleLength + 1),
+      },
+    ];
+    expect(cardToTemplate(card("Q", tooLong))).toBeNull();
   });
 
   it("declines an over-long button id", () => {

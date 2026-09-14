@@ -175,6 +175,7 @@ src/
     template.ts         card -> native Q&A button card, or null
     oauth.ts            authorize URL and authorization-code exchange
     webhook-config.ts   app-level callback registration
+    webhook-router.ts   one endpoint, many per-account adapters
     media.ts            image upload/download and the capability probe
 __tests__/              mirrors src/, all HTTP mocked
 ```
@@ -251,6 +252,48 @@ processed with this connection's credentials. That check runs before any event
 is routed, including referrals — a referral is attribution data, and reporting
 another account's under this one's `businessId` would be worse than dropping
 it.
+
+### Serving many accounts
+
+One adapter instance serves one business account, and rejecting a foreign
+envelope is correct but leaves a platform to route deliveries itself. That is
+harder than it looks: a `Request` body can only be read once, so peeking at it
+to find the account leaves nothing for the adapter to verify.
+
+`TikTokWebhookRouter` reads the body once, verifies it, and passes the verified
+bytes to the owning adapter.
+
+Verifying a second time in the adapter looks like prudence and is a bug. The
+signature carries a timestamp checked against a five-second tolerance, and the
+router may have spent that budget loading a cold tenant; the second check would
+then reject a delivery the first accepted. Because that answer is not 2xx,
+TikTok would retry it — down the same slow path, forever. So the adapter
+exposes an entry point that accepts an already-verified body, kept out of the
+package's exports and documented as requiring the caller to have verified
+against the same app secret.
+
+That entry point is only safe because the router refuses an adapter belonging
+to a different app: one app secret signs every tenant's deliveries, so an
+adapter from a second app could otherwise be handed a body verified against a
+secret it does not share. `register()` compares in constant time and throws.
+The router also refuses an empty app secret, which `createHmac` would
+otherwise accept as a key anyone can guess — the same check the adapter makes,
+and the one thing a router built around verification must not skip.
+
+Ordering is the security property. Verification precedes reading the account,
+because the account selects the credentials used to reply, and because an
+unverified body must not reach a tenant lookup — those are database queries,
+and letting an unauthenticated caller aim them at arbitrary account IDs is a
+denial-of-service surface. That ordering is not provable by a test that
+registers the adapter in advance: the adapter's own verification returns 401
+too, masking a router that never checked. The test therefore uses a tenant
+reachable only through the resolver, and asserts the resolver was never
+consulted.
+
+Two failure modes are answered differently on purpose. An unknown account is
+permanent, so it returns 200 and TikTok stops retrying. A resolver that throws
+is transient — a database blip — so it returns 503 and the delivery comes
+back. Collapsing them would either discard messages or replay them forever.
 
 ### Referral attribution
 
@@ -368,12 +411,19 @@ sent as `message_type: "TEMPLATE"` and renders as real tappable buttons.
 would be lost, which sends the card down the text path instead:
 
 - more than three buttons, or none once disabled ones are removed;
-- a button label over 20 characters or an ID over 40 — TikTok defines no
+- a button label over 40 characters or an ID over 40 — TikTok defines no
   truncation, and shortening a label would change what the user is agreeing to;
 - a question over 40 characters, or body prose that a title-only template
   cannot carry;
 - link buttons or selects, whose URLs and option lists a template cannot
   express.
+
+TikTok offers two card types, and the choice is made by label length rather
+than left to the caller. A button card renders tappable buttons but caps
+labels at 20 characters; a link card renders inline text links and allows 40.
+Buttons read better, so they are preferred whenever every label fits, and a
+label between 21 and 40 characters selects a link card instead of falling back
+to plain text — which would otherwise discard every button over one long word.
 
 The send and webhook representations of a template differ, which is worth
 stating because it is easy to conflate them: the send request takes a flat

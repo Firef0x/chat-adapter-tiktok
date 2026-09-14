@@ -96,6 +96,63 @@ surfacing later as an opaque API rejection.
 | `baseUrl` | `string` | TikTok's host | Override the API host. Intended for testing |
 | `logger` | `Logger` | Chat SDK's | Logger override |
 
+## Serving many accounts
+
+TikTok delivers every authorized account's webhooks to a single app URL, so a
+platform serving more than one business must decide which adapter owns each
+delivery. `TikTokWebhookRouter` does that:
+
+```typescript
+import { TikTokWebhookRouter } from "chat-adapter-tiktok";
+
+const router = new TikTokWebhookRouter({ appSecret: process.env.TIKTOK_APP_SECRET });
+router.register(adapterForAcme).register(adapterForGlobex);
+
+export async function POST(request: Request) {
+  return router.handleWebhook(request);
+}
+```
+
+For more tenants than you want resident in memory, register nothing and
+resolve on demand:
+
+```typescript
+new TikTokWebhookRouter({
+  appSecret,
+  resolve: async (businessId) => adapterCache.get(businessId) ?? (await loadTenant(businessId)),
+});
+```
+
+Return `null` for "not one of ours" — a permanent answer, which the router
+reports as `200` so TikTok stops retrying. **Throw** if the lookup itself
+failed, such as a database being unreachable: that is transient, and the
+router answers `503` so the delivery is retried rather than discarded.
+
+The router does not cache resolver results, so cache in your resolver. Besides
+the lookup cost, an adapter rebuilt per delivery starts with empty
+deduplication state, which is what stops a retried webhook being handled twice
+and stops the bot answering its own replies.
+
+Doing this by hand is harder than it looks. A `Request` body can only be read
+once, so peeking at it to find the account leaves nothing for the adapter to
+verify. The router reads the body once, verifies it once, and passes the
+verified bytes on.
+
+Verification happens **before** the account is read, because the account
+selects the credentials used to reply, and because an unverified body must not
+be able to drive tenant lookups.
+
+It also happens only once on purpose. TikTok's signature carries a timestamp
+checked against a five-second tolerance, so a second check after a slow tenant
+load would reject a delivery the first accepted — and TikTok retries anything
+that is not 2xx, so that delivery would loop forever. Set
+`signatureToleranceSeconds` on the *router* if your tenant lookups are slow;
+it is the only tolerance in play.
+
+Every adapter must belong to the same TikTok app as the router, since one app
+secret signs them all. `register()` refuses a mismatch rather than letting
+each of that adapter's deliveries fail.
+
 ## Webhook configuration
 
 Register the callback URL programmatically instead of clicking through the
@@ -231,6 +288,7 @@ different name, and the one every messaging call needs.
 | Webhook configuration | ✅ | Register, read, and remove the callback URL programmatically |
 | Referral attribution | ✅ | `onReferral` reports the ad or link that started a conversation |
 | Rate-limit backoff | ✅ | Bounded retry on TikTok's `40100` |
+| Many accounts on one endpoint | ✅ | `TikTokWebhookRouter`, with eager or lazy tenant resolution |
 | Stickers and emoji | ✅ | Received as attachments carrying their URL |
 | Images | ✅ | Send and receive, subject to TikTok's regional gating |
 | Video and other media | ⚠️ | Received as a downloadable attachment; TikTok cannot send them |
@@ -313,9 +371,13 @@ A card with a short question and one to three plain buttons is sent as a TikTok
 **Q&A button card**, which renders as real tappable buttons. When the user taps
 one, TikTok delivers their choice as a normal text message.
 
-Anything that does not fit degrades to plain text rather than being dropped —
-more than three buttons, a button label over 20 characters, a question over 40,
-or a card carrying link buttons or select options:
+Labels longer than 20 characters are sent as a **Q&A link card** instead, which
+renders inline text links and allows up to 40 — so a slightly long label costs
+you the button styling, not the buttons themselves.
+
+Anything that fits neither degrades to plain text rather than being dropped —
+more than three buttons, a label over 40 characters, a question over 40, or a
+card carrying link buttons or select options:
 
 ```
 Order status

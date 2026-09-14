@@ -19,6 +19,7 @@ export { TikTokFormatConverter } from "./lib/format-converter.js";
 export {
   canSendImage,
   fetchMediaBytes,
+  fetchUrlBytes,
   getMediaDownloadUrl,
   MAX_IMAGE_BYTES,
   type MediaDownloadOptions,

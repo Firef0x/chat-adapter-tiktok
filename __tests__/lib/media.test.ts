@@ -5,6 +5,7 @@ import { type AccessTokenProvider, TikTokApiClient } from "../../src/lib/api-cli
 import {
   canSendImage,
   fetchMediaBytes,
+  fetchUrlBytes,
   getMediaDownloadUrl,
   MAX_IMAGE_BYTES,
   toImageBuffer,
@@ -190,5 +191,38 @@ describe("canSendImage", () => {
     await expect(
       canSendImage(clientWith(vi.fn(async () => okResponse({}))), "biz_1", "c_1"),
     ).resolves.toBe(false);
+  });
+});
+
+describe("fetchUrlBytes", () => {
+  it("fetches without an auth header", async () => {
+    // Sticker and emoji URLs are served directly, unlike the media host.
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+    }));
+
+    const bytes = await fetchUrlBytes("https://cdn/s.png", fetchImpl as never);
+
+    expect(bytes.length).toBe(4);
+    expect((fetchImpl.mock.calls[0] as [string, RequestInit | undefined])[1]).toBeUndefined();
+  });
+
+  it("reports a failed download rather than returning empty bytes", async () => {
+    await expect(
+      fetchUrlBytes("https://cdn/s.png", vi.fn(async () => ({ ok: false, status: 404 })) as never),
+    ).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("wraps a transport failure", async () => {
+    await expect(
+      fetchUrlBytes(
+        "https://cdn/s.png",
+        vi.fn(async () => {
+          throw new Error("ECONNRESET");
+        }) as never,
+      ),
+    ).rejects.toBeInstanceOf(NetworkError);
   });
 });

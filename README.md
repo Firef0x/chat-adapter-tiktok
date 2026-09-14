@@ -162,9 +162,11 @@ asymmetry for you.
 | Channel info | ✅ | `fetchChannelInfo()` returns the business account's profile |
 | OAuth | ✅ | `buildAuthorizeUrl()` and `exchangeAuthCode()`, plus automatic refresh |
 | Button taps | ✅ | Delivered as messages; `getButtonTapId()` recovers the button |
+| Quoted replies | ✅ | `reply()`, text only — TikTok's constraint |
+| Stickers and emoji | ✅ | Received as attachments carrying their URL |
 | Images | ✅ | Send and receive, subject to TikTok's regional gating |
 | Video and other media | ⚠️ | Received as a downloadable attachment; TikTok cannot send them |
-| Reactions | ❌ | No platform API; throws `NotImplementedError` |
+| Reactions | ⚠️ | Received as reaction events; sending throws, as TikTok has no API for it |
 | Edit and delete | ❌ | No platform API; throws `NotImplementedError` |
 | Group threads | ❌ | TikTok direct messages are 1:1 only |
 | Starting a conversation | ❌ | Not permitted by the platform |
@@ -202,6 +204,27 @@ download URL takes a separate request, and it expires after 24 hours — so
 ```typescript
 const bytes = await message.attachments[0]?.fetchData?.();
 ```
+
+### Reactions and stickers
+
+A reaction arrives as a reaction event rather than a message, so the emoji,
+the direction, and the message it applies to all survive:
+
+```typescript
+chat.onReaction(async (event) => {
+  if (event.added) {
+    console.log(`${event.rawEmoji} on ${event.messageId}`);
+  }
+});
+```
+
+Compare on `event.rawEmoji` rather than by identity: TikTok sends the emoji
+character itself and the SDK has no reverse lookup from a character to a
+well-known name, so `event.emoji` is built from the character.
+
+Stickers and emoji arrive as attachments carrying a direct URL — no download
+request and no auth header, unlike images and video. A sticker URL is valid for
+30 days; an emoji URL does not expire.
 
 ### Cards and buttons
 

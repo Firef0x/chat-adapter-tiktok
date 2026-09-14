@@ -216,6 +216,35 @@ Webhooks for every authorized account arrive at one app URL, so an envelope
 whose `user_openid` is not the configured `business_id` is refused rather than
 processed with this connection's credentials.
 
+### Reactions, quoting, and stickers
+
+Three inbound and outbound capabilities are shaped by TikTok constraints
+rather than by preference.
+
+A **reaction** is not a message, and routing it through `processMessage` would
+put a bare `[reaction]` into the conversation while discarding the emoji, the
+direction, and the message it applied to. It is dispatched through
+`processReaction` instead, one event per entry, since a single payload can
+carry several. TikTok sends the emoji character itself and the SDK offers no
+reverse lookup from a character to a well-known name, so `emoji` is built from
+the character and `rawEmoji` is the value worth comparing against. Reactions
+remain receive-only: there is no API to add one, so `addReaction` still throws.
+
+A **quoted reply** requires `message_type: "TEXT"` alongside
+`referenced_message_info`, so `reply()` bypasses the template path entirely — a
+card is flattened to text rather than sent as a Q&A card — and an image is
+rejected outright. Whether the *referenced* message is a legal target is left
+to TikTok, since only TikTok knows what that message was.
+
+**Stickers and emoji** arrive as plain URLs rather than media IDs, so they need
+neither the download-URL request nor the `x-user` header that images and video
+require. They become attachments carrying the URL directly.
+
+All outbound paths funnel through one `send()` helper so the echo-suppression
+bookkeeping cannot be forgotten by one of them. Sender actions deliberately sit
+outside it: `SENDER_ACTION` legitimately returns an empty message ID, which
+`send()` treats as a malformed response.
+
 ### Unsupported platform operations
 
 Chat SDK's `Adapter` interface makes `addReaction`, `removeReaction`,

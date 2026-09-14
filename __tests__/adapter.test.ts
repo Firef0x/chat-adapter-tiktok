@@ -92,6 +92,11 @@ function restMessage(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** The reactor's user ID from a recorded reaction event. */
+function userIdOf(entry?: { event?: Record<string, unknown> }): string | undefined {
+  return (entry?.event?.user as { userId?: string } | undefined)?.userId;
+}
+
 /** Minimal ChatInstance stand-in that records dispatched messages. */
 function attachChat() {
   const processed: Array<{ threadId: string; factory: () => Promise<unknown> }> = [];
@@ -758,6 +763,245 @@ describe("TikTokAdapter", () => {
     });
   });
 
+  describe("reply", () => {
+    function threadFor(local: TikTokAdapter) {
+      return local.encodeThreadId({
+        businessId: BUSINESS_ID,
+        conversationId: CONVERSATION_ID,
+      });
+    }
+
+    it("quotes the referenced message as a TEXT send", async () => {
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_r" } }));
+      const { adapter: local } = build(sendFetch);
+
+      const result = await local.reply(threadFor(local), "msg_original", "sure thing");
+
+      expect(result.id).toBe("msg_r");
+      const body = JSON.parse((sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
+      expect(body).toMatchObject({
+        message_type: "TEXT",
+        text: { body: "sure thing" },
+        referenced_message_info: { referenced_message_id: "msg_original" },
+      });
+    });
+
+    it("flattens a card rather than sending a template", async () => {
+      // referenced_message_info requires message_type TEXT, so a quoted reply
+      // can never be a template.
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_r" } }));
+      const { adapter: local } = build(sendFetch);
+
+      await local.reply(threadFor(local), "msg_original", {
+        card: {
+          type: "card",
+          title: "How can we help?",
+          children: [{ type: "actions", children: [{ type: "button", id: "t", label: "Track" }] }],
+        },
+      } as never);
+
+      const body = JSON.parse((sendFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
+      expect(body.message_type).toBe("TEXT");
+      expect(body.template).toBeUndefined();
+      expect(body.text.body).toContain("Track");
+    });
+
+    it("refuses an image as a quoted reply", async () => {
+      const sendFetch = vi.fn();
+      const { adapter: local } = build(sendFetch);
+
+      await expect(
+        local.reply(threadFor(local), "msg_original", {
+          files: [{ data: Buffer.from("png"), filename: "a.png", mimeType: "image/png" }],
+        } as never),
+      ).rejects.toThrow(/text-only quoted replies/);
+      expect(sendFetch).not.toHaveBeenCalled();
+    });
+
+    it("applies the same text limits as a plain send", async () => {
+      const sendFetch = vi.fn();
+      const { adapter: local } = build(sendFetch);
+
+      await expect(local.reply(threadFor(local), "m", "")).rejects.toThrow(/empty message/);
+      await expect(local.reply(threadFor(local), "m", "x".repeat(6001))).rejects.toThrow(
+        /at most 6000/,
+      );
+      expect(sendFetch).not.toHaveBeenCalled();
+    });
+
+    it("records the reply so its echo is recognized", async () => {
+      const sendFetch = vi.fn(async () => okResponse({ message: { message_id: "msg_r" } }));
+      const { adapter: local } = build(sendFetch);
+
+      await local.reply(threadFor(local), "msg_original", "hi");
+      const echo = local.parseMessage(
+        messageContent({
+          message_id: "msg_r",
+          from_user: { id: BUSINESS_ID, role: "business_account" },
+        }),
+      );
+
+      expect(echo.author.isMe).toBe(true);
+    });
+  });
+
+  describe("inbound reactions", () => {
+    function reactionContent(entries: unknown[]) {
+      return messageContent({
+        message_id: "msg_reaction",
+        type: "reaction",
+        text: undefined,
+        reaction: entries as never,
+      });
+    }
+
+    async function dispatch(content: unknown) {
+      const processed: unknown[] = [];
+      const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+      const chat = {
+        getLogger: () => logger,
+        processMessage: () => processed.push({ kind: "message" }),
+        processReaction: (event: unknown) => processed.push({ kind: "reaction", event }),
+      };
+      await adapter.initialize(chat as never);
+      await adapter.handleWebhook(webhookRequest("im_receive_msg", content));
+      return processed as Array<{ kind: string; event?: Record<string, unknown> }>;
+    }
+
+    it("dispatches a reaction instead of a bare placeholder message", async () => {
+      // Routing it as a message would put "[reaction]" in the conversation and
+      // discard the emoji, the direction, and the target message.
+      const processed = await dispatch(
+        reactionContent([
+          {
+            operation: "ADD",
+            type: "EMOJI",
+            emoji: "👍",
+            unique_identifier: USER_ID,
+            timestamp: 1,
+            original_msg_id: "msg_target",
+          },
+        ]),
+      );
+
+      expect(processed).toHaveLength(1);
+      expect(processed[0]?.kind).toBe("reaction");
+      expect(processed[0]?.event).toMatchObject({
+        // `adapter` is optional in the SDK's type but required at runtime:
+        // without it the event is dropped before any handler runs, so the
+        // whole feature silently does nothing.
+        adapter,
+        added: true,
+        rawEmoji: "👍",
+        messageId: "msg_target",
+        threadId: adapter.encodeThreadId({
+          businessId: BUSINESS_ID,
+          conversationId: CONVERSATION_ID,
+        }),
+      });
+      expect(userIdOf(processed[0])).toBe(USER_ID);
+    });
+
+    it("attributes each entry to its own reactor", async () => {
+      // A batched payload must not credit every reaction to the payload
+      // header's sender. The SDK drops events whose user is the bot itself,
+      // so mis-attribution can silence a genuine reaction outright.
+      const processed = await dispatch(
+        reactionContent([
+          {
+            operation: "ADD",
+            type: "EMOJI",
+            emoji: "👍",
+            unique_identifier: "reactor_a",
+            timestamp: 1,
+            original_msg_id: "msg_target",
+          },
+          {
+            operation: "ADD",
+            type: "EMOJI",
+            emoji: "🎉",
+            unique_identifier: "reactor_b",
+            timestamp: 2,
+            original_msg_id: "msg_target",
+          },
+        ]),
+      );
+
+      expect(processed.map(userIdOf)).toEqual(["reactor_a", "reactor_b"]);
+    });
+
+    it("reports a removal as added: false", async () => {
+      const processed = await dispatch(
+        reactionContent([
+          {
+            operation: "REMOVE",
+            type: "EMOJI",
+            emoji: "👍",
+            unique_identifier: USER_ID,
+            timestamp: 1,
+            original_msg_id: "msg_target",
+          },
+        ]),
+      );
+
+      expect(processed[0]?.event).toMatchObject({ added: false });
+    });
+
+    it("emits one event per entry", async () => {
+      const entry = (emoji: string) => ({
+        operation: "ADD",
+        type: "EMOJI",
+        emoji,
+        unique_identifier: USER_ID,
+        timestamp: 1,
+        original_msg_id: "msg_target",
+      });
+
+      const processed = await dispatch(reactionContent([entry("👍"), entry("🎉")]));
+
+      expect(processed).toHaveLength(2);
+      expect(processed.every((p) => p.kind === "reaction")).toBe(true);
+    });
+
+    it("falls back to the AI emoji URL when there is no character", async () => {
+      const processed = await dispatch(
+        reactionContent([
+          {
+            operation: "ADD",
+            type: "AI_EMOJI",
+            ai_emoji_url: "https://cdn/ai.png",
+            unique_identifier: USER_ID,
+            timestamp: 1,
+            original_msg_id: "msg_target",
+          },
+        ]),
+      );
+
+      expect(processed[0]?.event).toMatchObject({ rawEmoji: "https://cdn/ai.png" });
+    });
+
+    it("dispatches nothing for a reaction payload with no entries", async () => {
+      const processed = await dispatch(reactionContent([]));
+      expect(processed).toHaveLength(0);
+    });
+
+    it("skips an entry with no target message", async () => {
+      const processed = await dispatch(
+        reactionContent([
+          {
+            operation: "ADD",
+            type: "EMOJI",
+            emoji: "👍",
+            unique_identifier: USER_ID,
+            timestamp: 1,
+          },
+        ]),
+      );
+
+      expect(processed).toHaveLength(0);
+    });
+  });
+
   describe("images", () => {
     const png = { data: Buffer.from("png"), filename: "a.png", mimeType: "image/png" };
 
@@ -867,6 +1111,58 @@ describe("TikTokAdapter", () => {
     it("gives a text message no attachments", () => {
       const { adapter: local } = build();
       expect(local.parseMessage(messageContent()).attachments).toEqual([]);
+    });
+
+    it.each([
+      ["sticker", { sticker: { url: "https://cdn/s.png" } }],
+      ["emoji", { emoji: { url: "https://cdn/e.png" } }],
+    ])("exposes an inbound %s as an attachment with its URL", (type, extra) => {
+      // These arrive as plain URLs, so they need no download-URL request.
+      const { adapter: local } = build();
+
+      const message = local.parseMessage(
+        messageContent({ type: type as never, text: undefined, ...extra }),
+      );
+
+      expect(message.attachments).toHaveLength(1);
+      expect(message.attachments[0]).toMatchObject({
+        type: "image",
+        // The extension comes from the URL, so a consumer can infer a type.
+        name: `${type}.png`,
+        mimeType: "image/png",
+        url: Object.values(extra)[0]?.url,
+      });
+    });
+
+    it("falls back to a bare name when the URL has no extension", () => {
+      const { adapter: local } = build();
+
+      const message = local.parseMessage(
+        messageContent({ type: "sticker", text: undefined, sticker: { url: "https://cdn/s" } }),
+      );
+
+      expect(message.attachments[0]).toMatchObject({ name: "sticker" });
+      expect(message.attachments[0]?.mimeType).toBeUndefined();
+    });
+
+    it("downloads a sticker without an auth header", async () => {
+      // The media host needs `x-user`; a sticker URL is served directly.
+      const calls = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => new Uint8Array([9]).buffer,
+      }));
+      const { adapter: local } = build(calls);
+
+      const message = local.parseMessage(
+        messageContent({ type: "sticker", text: undefined, sticker: { url: "https://cdn/s.png" } }),
+      );
+      const bytes = await message.attachments[0]?.fetchData?.();
+
+      expect((bytes as Buffer).length).toBe(1);
+      const [url, init] = calls.mock.calls[0] as [string, RequestInit | undefined];
+      expect(url).toBe("https://cdn/s.png");
+      expect(init?.headers).toBeUndefined();
     });
   });
 

@@ -155,6 +155,31 @@ export async function fetchMediaBytes(
 }
 
 /**
+ * Fetch bytes from a plain URL.
+ *
+ * Sticker and emoji URLs are served directly and take no auth header — unlike
+ * the media download host, which requires `x-user`.
+ */
+export async function fetchUrlBytes(url: string, fetchImpl: typeof fetch = fetch): Promise<Buffer> {
+  let response: Response;
+  try {
+    response = await fetchImpl(url);
+  } catch (error) {
+    throw new NetworkError(
+      ADAPTER_NAME,
+      "Download failed",
+      error instanceof Error ? error : undefined,
+    );
+  }
+
+  if (!response.ok) {
+    throw new NetworkError(ADAPTER_NAME, `Download failed (HTTP ${response.status}).`);
+  }
+
+  return Buffer.from(await response.arrayBuffer());
+}
+
+/**
  * Ask whether images may be sent in this conversation.
  *
  * Image support is region-gated on both sides of the conversation, so it has

@@ -2,6 +2,7 @@ import { extractCard, extractFiles, NetworkError, ValidationError } from "@chat-
 import type {
   Adapter,
   AdapterPostableMessage,
+  Author,
   ChatInstance,
   EmojiValue,
   FetchOptions,
@@ -18,7 +19,7 @@ import type {
   ThreadSummary,
   WebhookOptions,
 } from "chat";
-import { ConsoleLogger, Message, NotImplementedError } from "chat";
+import { ConsoleLogger, emoji, Message, NotImplementedError } from "chat";
 
 import { TikTokApiClient } from "./lib/api-client.js";
 import { BoundedSet } from "./lib/bounded-set.js";
@@ -33,6 +34,7 @@ import {
 import {
   canSendImage,
   fetchMediaBytes,
+  fetchUrlBytes,
   getMediaDownloadUrl,
   toImageBuffer,
   uploadImage,
@@ -82,6 +84,22 @@ const REQUIRED_CREDENTIALS = [
  * which throws no error and compares false against everything — silently
  * corrupting ordering downstream.
  */
+/**
+ * The file extension of a URL's path, lowercased, or `null`.
+ *
+ * Query strings carry expiry parameters on TikTok's sticker URLs, so the path
+ * has to be isolated before looking for a suffix.
+ */
+function extensionFromUrl(url: string): string | null {
+  try {
+    const path = new URL(url).pathname;
+    const match = /\.([a-z0-9]{2,4})$/i.exec(path);
+    return match?.[1]?.toLowerCase() ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function toDate(timestamp: number | undefined): Date {
   return Number.isFinite(timestamp) ? new Date(timestamp as number) : new Date();
 }
@@ -285,7 +303,77 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     // never reached the host is not remembered as delivered.
     this.seenMessages.add(content.message_id);
 
+    if (content.type === "reaction") {
+      this.dispatchReactions(this.chat, content, threadId, options);
+      return;
+    }
+
     await this.chat.processMessage(this, threadId, async () => this.parseMessage(content), options);
+  }
+
+  /**
+   * Deliver a reaction payload as reaction events.
+   *
+   * A reaction is not a message: routing it through `processMessage` would put
+   * a bare "[reaction]" into the conversation and discard which emoji was
+   * used, whether it was added or removed, and which message it applied to.
+   *
+   * One payload can carry several entries, and each is dispatched separately
+   * so a host sees one event per reaction.
+   */
+  private dispatchReactions(
+    chat: ChatInstance,
+    content: TikTokMessageContent,
+    threadId: string,
+    options?: WebhookOptions,
+  ): void {
+    const entries = content.reaction ?? [];
+    if (entries.length === 0) {
+      // The payload said "reaction" and carried none, so the parsing
+      // assumption is wrong — and the ID is already recorded as seen, so a
+      // redelivery will not surface it either.
+      this.logger.warn("A TikTok reaction payload carried no reactions", {
+        messageId: content.message_id,
+      });
+      return;
+    }
+
+    const author = this.authorOf(content);
+
+    for (const entry of entries) {
+      // AI emoji are images rather than characters, so the URL is the only
+      // identity available for them.
+      const rawEmoji = entry.emoji ?? entry.ai_emoji_url;
+      if (!rawEmoji || !entry.original_msg_id) {
+        this.logger.debug("Ignoring an unusable TikTok reaction entry", {
+          messageId: content.message_id,
+        });
+        continue;
+      }
+
+      chat.processReaction(
+        {
+          // Optional in the SDK's type but required at runtime: without it
+          // the event is dropped before any handler runs.
+          adapter: this,
+          added: entry.operation === "ADD",
+          // TikTok sends the character itself and the SDK exposes no reverse
+          // lookup from a character to a well-known name, so the character
+          // becomes the name. Compare against `rawEmoji`, not identity.
+          emoji: emoji.custom(rawEmoji),
+          rawEmoji,
+          messageId: entry.original_msg_id,
+          threadId,
+          // Each entry names its own reactor, so a batched payload must not
+          // attribute every reaction to whoever the payload header names. The
+          // SDK drops events whose user is the bot itself, so getting this
+          // wrong can silence a genuine reaction.
+          user: { ...author, userId: entry.unique_identifier || author.userId },
+          raw: entry,
+        },
+        options,
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -315,11 +403,21 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     return isFromBusiness && content.message_tag?.source === "API";
   }
 
+  /** The sender of an inbound payload, shared by messages and reactions. */
+  private authorOf(content: TikTokMessageContent): Author {
+    const isOwnEcho = this.isOwnEcho(content);
+    return {
+      userId: content.from_user?.id ?? content.unique_identifier ?? "",
+      userName: content.from ?? "",
+      fullName: content.from ?? "",
+      isBot: isOwnEcho,
+      isMe: isOwnEcho,
+    };
+  }
+
   parseMessage(raw: TikTokRawMessage): Message<TikTokRawMessage> {
     const content = raw as TikTokMessageContent;
     const text = this.extractText(content);
-
-    const isOwnEcho = this.isOwnEcho(content);
 
     return new Message<TikTokRawMessage>({
       id: content.message_id,
@@ -330,13 +428,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       text,
       formatted: this.converter.toAst(text),
       raw,
-      author: {
-        userId: content.from_user?.id ?? content.unique_identifier ?? "",
-        userName: content.from ?? "",
-        fullName: content.from ?? "",
-        isBot: isOwnEcho,
-        isMe: isOwnEcho,
-      },
+      author: this.authorOf(content),
       metadata: {
         dateSent: toDate(content.timestamp),
         edited: false,
@@ -355,6 +447,25 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
    * to the first caller that actually wants the file.
    */
   private inboundAttachments(content: TikTokMessageContent): Attachment[] {
+    // Stickers and emoji arrive as plain URLs rather than media IDs, so they
+    // need no download-URL request and no auth header. A sticker URL is good
+    // for 30 days; an emoji URL does not expire.
+    const directUrl = content.sticker?.url ?? content.emoji?.url;
+    if (directUrl) {
+      const extension = extensionFromUrl(directUrl);
+
+      return [
+        {
+          type: "image",
+          // A bare "sticker" gives a consumer nothing to infer a type from.
+          name: extension ? `${content.type}.${extension}` : content.type,
+          mimeType: extension ? `image/${extension === "jpg" ? "jpeg" : extension}` : undefined,
+          url: directUrl,
+          fetchData: async () => fetchUrlBytes(directUrl, this.fetchImpl),
+        },
+      ];
+    }
+
     const mediaId = content.image?.media_id ?? content.video?.media_id;
     if (!mediaId) {
       return [];
@@ -408,6 +519,8 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       case "template":
         return this.templateToText(content) || "[template]";
       case "reaction":
+        // The webhook path dispatches reactions as events and never reaches
+        // here; this remains only for a host calling parseMessage directly.
         return "[reaction]";
       default:
         // A type TikTok added after this release. Returning "" would present
@@ -470,6 +583,16 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       }
     }
 
+    return { ...base, message_type: "TEXT", text: { body: this.renderSendableText(message) } };
+  }
+
+  /**
+   * Flatten a postable to text TikTok will accept.
+   *
+   * Shared by the plain and quoted-reply paths so both reject the same things
+   * before spending a request.
+   */
+  private renderSendableText(message: AdapterPostableMessage): string {
     const text = this.converter.renderPostable(message);
 
     if (!text) {
@@ -482,7 +605,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       );
     }
 
-    return { ...base, message_type: "TEXT", text: { body: text } };
+    return text;
   }
 
   /**
@@ -548,6 +671,43 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     };
   }
 
+  /**
+   * Reply to a specific message, quoting it.
+   *
+   * TikTok supports this only for text: `referenced_message_info` requires
+   * `message_type: "TEXT"`, so a card is flattened to text rather than sent as
+   * a template, and an image cannot be a quoted reply at all.
+   *
+   * The referenced message must itself be a text, image, or shared post —
+   * quoting a template or a reaction is rejected by the platform, not here,
+   * since only TikTok knows what the referenced message was.
+   */
+  async reply(
+    threadId: string,
+    messageId: string,
+    message: AdapterPostableMessage,
+  ): Promise<RawMessage<TikTokRawMessage>> {
+    const { conversationId } = this.decodeThreadId(threadId);
+
+    if (extractFiles(message).length > 0) {
+      throw new ValidationError(
+        ADAPTER_NAME,
+        "TikTok supports text-only quoted replies. Send the image as its own message.",
+      );
+    }
+
+    const text = this.renderSendableText(message);
+
+    return this.send(threadId, {
+      business_id: this.config.businessId,
+      recipient_type: "CONVERSATION",
+      recipient: conversationId,
+      message_type: "TEXT",
+      text: { body: text },
+      referenced_message_info: { referenced_message_id: messageId },
+    });
+  }
+
   async postMessage(
     threadId: string,
     message: AdapterPostableMessage,
@@ -557,6 +717,19 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       (await this.buildImageSendBody(conversationId, message)) ??
       this.buildSendBody(conversationId, message);
 
+    return this.send(threadId, body);
+  }
+
+  /**
+   * Perform a send and record the resulting message ID.
+   *
+   * Shared by every outbound path so the echo-suppression bookkeeping cannot
+   * be forgotten by one of them.
+   */
+  private async send(
+    threadId: string,
+    body: TikTokSendMessageRequest,
+  ): Promise<RawMessage<TikTokRawMessage>> {
     const data = await this.api.request<TikTokSendMessageData>({
       method: "POST",
       path: "business/message/send/",

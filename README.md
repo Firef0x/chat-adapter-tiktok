@@ -161,7 +161,8 @@ asymmetry for you.
 | Listing conversations | ✅ | `listConversations()` is cheap; `listThreads()` costs one request per conversation |
 | Channel info | ✅ | `fetchChannelInfo()` returns the business account's profile |
 | OAuth | ✅ | `buildAuthorizeUrl()` and `exchangeAuthCode()`, plus automatic refresh |
-| Images and media | ❌ | Planned for v0.2. Inbound media arrives as a placeholder |
+| Images | ✅ | Send and receive, subject to TikTok's regional gating |
+| Video and other media | ⚠️ | Received as a downloadable attachment; TikTok cannot send them |
 | Reactions | ❌ | No platform API; throws `NotImplementedError` |
 | Edit and delete | ❌ | No platform API; throws `NotImplementedError` |
 | Group threads | ❌ | TikTok direct messages are 1:1 only |
@@ -182,6 +183,24 @@ failing the whole page.
 
 Both cover only the last 90 days, which is TikTok's retention for this
 endpoint.
+
+### Images
+
+Send an image by attaching it to a postable; the adapter checks the
+conversation's capability, uploads the file, and sends it:
+
+```typescript
+await thread.post({ files: [{ data: pngBuffer, filename: "chart.png", mimeType: "image/png" }] });
+```
+
+Inbound images and videos arrive as attachments whose bytes are **not**
+downloaded during parsing. Most messages are never asked for their media, the
+download URL takes a separate request, and it expires after 24 hours — so
+`fetchData()` defers all of that to the first caller that wants the file:
+
+```typescript
+const bytes = await message.attachments[0]?.fetchData?.();
+```
 
 ### Cards and buttons
 

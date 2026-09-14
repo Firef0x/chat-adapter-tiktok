@@ -143,6 +143,7 @@ src/
     card-to-text.ts     card flattening, buttons included
     template.ts         card -> native Q&A button card, or null
     oauth.ts            authorize URL and authorization-code exchange
+    media.ts            image upload/download and the capability probe
 __tests__/              mirrors src/, all HTTP mocked
 ```
 
@@ -353,7 +354,7 @@ Steps are numbered as in the parent investigation.
 | 3 | `types.ts` | Done |
 | 4 | OAuth and token manager | Done, both legs: `lib/oauth.ts` builds the authorize URL and exchanges the code, and the token manager owns the refresh cycle |
 | 5 | `TikTokAdapter` class | Done |
-| 6 | Format converter | Done, including native Q&A button cards; media pending v0.2 |
+| 6 | Format converter | Done, including native Q&A button cards |
 | 7 | README, publish, directory listing | README done; publishing and the directory listing pending |
 
 Steps 2–6 have no dependency on step 1. They produce a complete, tested package
@@ -361,9 +362,6 @@ whose only unverified surface is wire-format fidelity.
 
 ## Deferred scope
 
-- **Attachments (v0.2).** Image send and receive, supported only in some
-  markets. Excluded from v0.1 to keep the first release's verified surface
-  small and honest.
 - **Installation store.** See Token manager above.
 - **Host integration.** Registering the adapter inside a particular application
   is separate work, tracked wherever that application lives.

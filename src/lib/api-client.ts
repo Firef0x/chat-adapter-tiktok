@@ -43,6 +43,14 @@ export interface TikTokRequest {
   path: string;
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
+  /**
+   * Multipart payload, for the media upload endpoint.
+   *
+   * When present it replaces `body`, and the Content-Type header is left unset
+   * so the runtime can add the multipart boundary — setting it by hand
+   * produces a body the server cannot parse.
+   */
+  formData?: FormData;
 }
 
 /**
@@ -144,8 +152,15 @@ export class TikTokApiClient {
   ): Promise<TikTokApiEnvelope<TData>> {
     const url = this.buildUrl(req.path, req.query);
     const headers: Record<string, string> = { "Access-Token": accessToken };
-    if (req.method === "POST") {
+    if (req.method === "POST" && !req.formData) {
       headers["Content-Type"] = "application/json";
+    }
+
+    let body: BodyInit | undefined;
+    if (req.formData) {
+      body = req.formData;
+    } else if (req.method === "POST") {
+      body = JSON.stringify(req.body ?? {});
     }
 
     let response: Response;
@@ -153,7 +168,7 @@ export class TikTokApiClient {
       response = await this.fetchImpl(url, {
         method: req.method,
         headers,
-        body: req.method === "POST" ? JSON.stringify(req.body ?? {}) : undefined,
+        body,
       });
     } catch (error) {
       throw new NetworkError(

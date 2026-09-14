@@ -1,4 +1,4 @@
-import { extractCard, NetworkError, ValidationError } from "@chat-adapter/shared";
+import { extractCard, extractFiles, NetworkError, ValidationError } from "@chat-adapter/shared";
 import type {
   Adapter,
   AdapterPostableMessage,
@@ -6,7 +6,9 @@ import type {
   EmojiValue,
   FetchOptions,
   FetchResult,
+  Attachment,
   ChannelInfo,
+  FileUpload,
   FormattedContent,
   ListThreadsOptions,
   ListThreadsResult,
@@ -28,6 +30,13 @@ import {
   decodeThreadId,
   encodeThreadId,
 } from "./lib/thread-id.js";
+import {
+  canSendImage,
+  fetchMediaBytes,
+  getMediaDownloadUrl,
+  toImageBuffer,
+  uploadImage,
+} from "./lib/media.js";
 import { cardToTemplate } from "./lib/template.js";
 import { TikTokTokenManager } from "./lib/token-manager.js";
 import { SIGNATURE_HEADER, verifyWebhookSignature } from "./lib/webhook.js";
@@ -103,6 +112,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
   private readonly api: TikTokApiClient;
   private readonly converter = new TikTokFormatConverter();
   private readonly useTemplates: boolean;
+  private readonly fetchImpl: typeof fetch;
 
   /** Message IDs already delivered to the host, to survive webhook retries. */
   private readonly seenMessages = new BoundedSet(1000);
@@ -126,6 +136,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     this.botUserId = config.businessId;
     this.logger = config.logger ?? new ConsoleLogger();
     this.useTemplates = config.useTemplates ?? true;
+    this.fetchImpl = config.fetchImpl ?? fetch;
 
     this.tokens = new TikTokTokenManager({
       appId: config.appId,
@@ -330,8 +341,44 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
         dateSent: toDate(content.timestamp),
         edited: false,
       },
-      attachments: [],
+      attachments: this.inboundAttachments(content),
     });
+  }
+
+  /**
+   * Describe inbound media as attachments the host can download on demand.
+   *
+   * The bytes are not fetched during parsing: most messages are never asked
+   * for their media, the download URL has to be requested separately, and it
+   * expires after 24 hours — so resolving it eagerly would waste two requests
+   * per message and could hand out a stale URL. `fetchData` defers all of that
+   * to the first caller that actually wants the file.
+   */
+  private inboundAttachments(content: TikTokMessageContent): Attachment[] {
+    const mediaId = content.image?.media_id ?? content.video?.media_id;
+    if (!mediaId) {
+      return [];
+    }
+
+    const isImage = content.type === "image";
+    const mediaType = isImage ? "IMAGE" : "VIDEO";
+
+    return [
+      {
+        type: isImage ? "image" : "video",
+        name: `${mediaType.toLowerCase()}-${mediaId}`,
+        fetchData: async () => {
+          const url = await getMediaDownloadUrl(this.api, {
+            businessId: this.config.businessId,
+            conversationId: content.conversation_id,
+            messageId: content.message_id,
+            mediaId,
+            mediaType,
+          });
+          return fetchMediaBytes(url, await this.tokens.getAccessToken(), this.fetchImpl);
+        },
+      },
+    ];
   }
 
   /**
@@ -438,12 +485,77 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     return { ...base, message_type: "TEXT", text: { body: text } };
   }
 
+  /**
+   * Build an image send, or `null` when the message carries no image.
+   *
+   * TikTok forbids text and an image in one message, and allows one image per
+   * message. Rather than quietly splitting the content into several sends —
+   * which would consume several slots of a messaging window capped as low as
+   * ten — the combination is rejected so the caller decides.
+   */
+  private async buildImageSendBody(
+    conversationId: string,
+    message: AdapterPostableMessage,
+  ): Promise<TikTokSendMessageRequest | null> {
+    const files = extractFiles(message);
+    if (files.length === 0) {
+      return null;
+    }
+
+    if (files.length > 1) {
+      throw new ValidationError(
+        ADAPTER_NAME,
+        `TikTok accepts one image per message; got ${files.length}. Send them as separate messages.`,
+      );
+    }
+
+    if (this.converter.renderPostable(message).trim()) {
+      throw new ValidationError(
+        ADAPTER_NAME,
+        "TikTok cannot combine text and an image in one message. Send them separately.",
+      );
+    }
+
+    const file = files[0] as FileUpload;
+    const data = await toImageBuffer(file.data);
+    if (!data) {
+      throw new ValidationError(ADAPTER_NAME, `Could not read the attachment "${file.filename}".`);
+    }
+
+    // Region-gated on both sides of the conversation, so it is checked per
+    // conversation. Skipping the check turns an unsupported region into an
+    // opaque parameter error.
+    if (!(await canSendImage(this.api, this.config.businessId, conversationId))) {
+      throw new ValidationError(
+        ADAPTER_NAME,
+        "This conversation cannot receive images. TikTok gates image support by the regions of both participants.",
+      );
+    }
+
+    const mediaId = await uploadImage(this.api, {
+      businessId: this.config.businessId,
+      data,
+      filename: file.filename,
+      mimeType: file.mimeType,
+    });
+
+    return {
+      business_id: this.config.businessId,
+      recipient_type: "CONVERSATION",
+      recipient: conversationId,
+      message_type: "IMAGE",
+      image: { media_id: mediaId },
+    };
+  }
+
   async postMessage(
     threadId: string,
     message: AdapterPostableMessage,
   ): Promise<RawMessage<TikTokRawMessage>> {
     const { conversationId } = this.decodeThreadId(threadId);
-    const body = this.buildSendBody(conversationId, message);
+    const body =
+      (await this.buildImageSendBody(conversationId, message)) ??
+      this.buildSendBody(conversationId, message);
 
     const data = await this.api.request<TikTokSendMessageData>({
       method: "POST",

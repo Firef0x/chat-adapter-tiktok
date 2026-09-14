@@ -16,6 +16,17 @@ export {
   TIKTOK_AUTHORIZE_URL,
 } from "./lib/oauth.js";
 export { TikTokFormatConverter } from "./lib/format-converter.js";
+export {
+  canSendImage,
+  fetchMediaBytes,
+  getMediaDownloadUrl,
+  MAX_IMAGE_BYTES,
+  type MediaDownloadOptions,
+  SUPPORTED_IMAGE_TYPES,
+  toImageBuffer,
+  uploadImage,
+  type UploadImageOptions,
+} from "./lib/media.js";
 export { cardToTemplate, TEMPLATE_LIMITS } from "./lib/template.js";
 export {
   channelIdFromThreadId,

@@ -758,6 +758,118 @@ describe("TikTokAdapter", () => {
     });
   });
 
+  describe("images", () => {
+    const png = { data: Buffer.from("png"), filename: "a.png", mimeType: "image/png" };
+
+    function threadFor(local: TikTokAdapter) {
+      return local.encodeThreadId({
+        businessId: BUSINESS_ID,
+        conversationId: CONVERSATION_ID,
+      });
+    }
+
+    it("checks capability, uploads, then sends an IMAGE message", async () => {
+      const calls = vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({
+            capability_infos: [{ capability_type: "IMAGE_SEND", capability_result: true }],
+          }),
+        )
+        .mockResolvedValueOnce(okResponse({ media_id: "media_1" }))
+        .mockResolvedValueOnce(okResponse({ message: { message_id: "msg_img" } }));
+      const { adapter: local } = build(calls);
+
+      const result = await local.postMessage(threadFor(local), { files: [png] } as never);
+
+      expect(result.id).toBe("msg_img");
+      const urls = calls.mock.calls.map((c) => c[0] as string);
+      expect(urls[0]).toContain("capabilities/get/");
+      expect(urls[1]).toContain("media/upload/");
+      const sendBody = JSON.parse((calls.mock.calls[2] as [string, RequestInit])[1].body as string);
+      expect(sendBody).toMatchObject({
+        message_type: "IMAGE",
+        image: { media_id: "media_1" },
+      });
+    });
+
+    it("refuses when the conversation cannot receive images", async () => {
+      // Region-gated on both sides; skipping the check yields an opaque error.
+      const calls = vi.fn(async () =>
+        okResponse({
+          capability_infos: [{ capability_type: "IMAGE_SEND", capability_result: false }],
+        }),
+      );
+      const { adapter: local } = build(calls);
+
+      await expect(local.postMessage(threadFor(local), { files: [png] } as never)).rejects.toThrow(
+        /gates image support/,
+      );
+    });
+
+    it("refuses text and an image together instead of quietly sending two", async () => {
+      // TikTok forbids the combination, and splitting it would consume two
+      // slots of a messaging window capped as low as ten.
+      const calls = vi.fn();
+      const { adapter: local } = build(calls);
+
+      await expect(
+        local.postMessage(threadFor(local), { raw: "caption", files: [png] } as never),
+      ).rejects.toThrow(/cannot combine text and an image/);
+      expect(calls).not.toHaveBeenCalled();
+    });
+
+    it("refuses more than one image per message", async () => {
+      const calls = vi.fn();
+      const { adapter: local } = build(calls);
+
+      await expect(
+        local.postMessage(threadFor(local), { files: [png, png] } as never),
+      ).rejects.toThrow(/one image per message/);
+      expect(calls).not.toHaveBeenCalled();
+    });
+
+    it("attaches inbound media without downloading it during parsing", async () => {
+      // Most messages are never asked for their bytes, and the download URL
+      // expires after 24 hours — so resolving eagerly would waste two requests.
+      const calls = vi.fn();
+      const { adapter: local } = build(calls);
+
+      const message = local.parseMessage(
+        messageContent({ type: "image", text: undefined, image: { media_id: "media_9" } }),
+      );
+
+      expect(message.attachments).toHaveLength(1);
+      expect(message.attachments[0]?.type).toBe("image");
+      expect(calls).not.toHaveBeenCalled();
+    });
+
+    it("downloads inbound media only when fetchData is called", async () => {
+      const calls = vi
+        .fn()
+        .mockResolvedValueOnce(okResponse({ download_url: "https://cdn/x" }))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          arrayBuffer: async () => new Uint8Array([7, 7]).buffer,
+        });
+      const { adapter: local } = build(calls);
+
+      const message = local.parseMessage(
+        messageContent({ type: "image", text: undefined, image: { media_id: "media_9" } }),
+      );
+      const bytes = await message.attachments[0]?.fetchData?.();
+
+      expect((bytes as Buffer).length).toBe(2);
+      expect(calls.mock.calls[0]?.[0]).toContain("media/download/");
+    });
+
+    it("gives a text message no attachments", () => {
+      const { adapter: local } = build();
+      expect(local.parseMessage(messageContent()).attachments).toEqual([]);
+    });
+  });
+
   describe("listConversations", () => {
     it("requests the conversation list with sane defaults", async () => {
       const listFetch = vi.fn(async () =>

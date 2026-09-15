@@ -49,6 +49,7 @@ import type {
   TikTokBusinessProfile,
   TikTokConversationListData,
   TikTokConversationType,
+  TikTokMarkReadContent,
   TikTokMessageContent,
   TikTokMessageListData,
   TikTokRawMessage,
@@ -304,6 +305,12 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       return;
     }
 
+    // A read receipt likewise carries no message of its own.
+    if (envelope.event === "im_mark_read_msg") {
+      await this.dispatchReadReceipt(envelope);
+      return;
+    }
+
     // Only these two carry a usable message. `im_receive_msg_eu` is
     // deliberately stripped by TikTok — no content, no conversation ID — so
     // there is nothing to deliver.
@@ -398,6 +405,56 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       // The host's own failure must not turn into a retried webhook, which
       // would replay the same referral and fail the same way.
       this.logger.error("The onReferral handler failed", { error });
+    }
+  }
+
+  /**
+   * Report that the user has read the conversation.
+   *
+   * TikTok emits this only for personal accounts — a business reading its own
+   * thread produces nothing — so it always means "the other side saw it".
+   * Chat SDK has no inbound read-receipt event, so it goes to the host's
+   * callback, and a host that has not asked for one gets a debug line rather
+   * than silence.
+   */
+  private async dispatchReadReceipt(envelope: TikTokWebhookEnvelope): Promise<void> {
+    const content = JSON.parse(envelope.content) as TikTokMarkReadContent;
+
+    // Coerced and validated here rather than deferred to `toDate`, whose
+    // fallback is "now". That is harmless for a message's own timestamp but
+    // wrong for a read receipt: this value is a high-water mark, so silently
+    // substituting the present marks more as read than the user read —
+    // including messages sent after the receipt was emitted. TikTok returns
+    // int64s as strings in several of its APIs, so a string is plausible.
+    const readMs = Number(content.read?.last_read_timestamp);
+
+    if (!content.conversation_id || !Number.isFinite(readMs) || readMs <= 0) {
+      this.logger.debug("Ignoring an incomplete TikTok read receipt");
+      return;
+    }
+
+    if (!this.config.onReadReceipt) {
+      this.logger.debug("A TikTok read receipt arrived but no onReadReceipt is configured", {
+        conversationId: content.conversation_id,
+      });
+      return;
+    }
+
+    try {
+      await this.config.onReadReceipt({
+        threadId: this.encodeThreadId({
+          businessId: this.config.businessId,
+          conversationId: content.conversation_id,
+        }),
+        businessId: this.config.businessId,
+        conversationId: content.conversation_id,
+        readAt: new Date(readMs),
+        raw: content,
+      });
+    } catch (error) {
+      // The host's own failure must not become a retried webhook, which would
+      // replay the same receipt and fail the same way.
+      this.logger.error("The onReadReceipt handler failed", { error });
     }
   }
 
@@ -537,18 +594,48 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
    * to the first caller that actually wants the file.
    */
   private inboundAttachments(content: TikTokMessageContent): Attachment[] {
+    return this.buildAttachments({
+      label: content.type,
+      stickerUrl: content.sticker?.url,
+      emojiUrl: content.emoji?.url,
+      imageId: content.image?.media_id,
+      videoId: content.video?.media_id,
+      messageId: content.message_id,
+      conversationId: content.conversation_id,
+    });
+  }
+
+  /**
+   * Build attachments from whichever media a payload carries.
+   *
+   * Shared by the webhook and history paths, which describe the same media in
+   * different vocabularies. They were duplicated at first, and the duplication
+   * immediately started to drift — a mime-type fix and a discriminator fix
+   * both had to be applied twice.
+   */
+  private buildAttachments(media: {
+    /** Names the file for a consumer; the payload's own type word. */
+    label: string;
+    stickerUrl?: string;
+    emojiUrl?: string;
+    imageId?: string;
+    videoId?: string;
+    messageId: string;
+    conversationId: string;
+  }): Attachment[] {
     // Stickers and emoji arrive as plain URLs rather than media IDs, so they
     // need no download-URL request and no auth header. A sticker URL is good
     // for 30 days; an emoji URL does not expire.
-    const directUrl = content.sticker?.url ?? content.emoji?.url;
+    const directUrl = media.stickerUrl ?? media.emojiUrl;
     if (directUrl) {
       const extension = extensionFromUrl(directUrl);
+      // A payload with no usable type word still needs a name.
+      const label = media.label || "attachment";
 
       return [
         {
           type: "image",
-          // A bare "sticker" gives a consumer nothing to infer a type from.
-          name: extension ? `${content.type}.${extension}` : content.type,
+          name: extension ? `${label}.${extension}` : label,
           mimeType: extension ? `image/${extension === "jpg" ? "jpeg" : extension}` : undefined,
           url: directUrl,
           fetchData: async () => fetchUrlBytes(directUrl, this.fetchImpl),
@@ -556,12 +643,15 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       ];
     }
 
-    const mediaId = content.image?.media_id ?? content.video?.media_id;
+    // Derived from the field that actually supplied the ID rather than from
+    // the payload's type word: the two can disagree, and asking TikTok to
+    // download a video using an image's ID fails.
+    const isImage = Boolean(media.imageId);
+    const mediaId = media.imageId ?? media.videoId;
     if (!mediaId) {
       return [];
     }
 
-    const isImage = content.type === "image";
     const mediaType = isImage ? "IMAGE" : "VIDEO";
 
     return [
@@ -571,8 +661,8 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
         fetchData: async () => {
           const url = await getMediaDownloadUrl(this.api, {
             businessId: this.config.businessId,
-            conversationId: content.conversation_id,
-            messageId: content.message_id,
+            conversationId: media.conversationId,
+            messageId: media.messageId,
             mediaId,
             mediaType,
           });
@@ -925,9 +1015,15 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
 
     const messages: Array<Message<TikTokRawMessage>> = [];
     for (const rest of data.messages ?? []) {
-      const parsed = this.parseRestMessage(rest, conversationId);
-      if (parsed) {
-        messages.push(parsed);
+      // Per entry, because this response's shape is unconfirmed: one entry
+      // that cannot be read should not discard the other nineteen.
+      try {
+        const parsed = this.parseRestMessage(rest, conversationId);
+        if (parsed) {
+          messages.push(parsed);
+        }
+      } catch (error) {
+        this.logger.warn("Skipping an unreadable TikTok history entry", { error });
       }
     }
 
@@ -987,7 +1083,33 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
         isMe: false,
       },
       metadata: { dateSent: toDate(rest.timestamp), edited: false },
-      attachments: [],
+      attachments: this.restAttachments(rest, conversationId),
+    });
+  }
+
+  /**
+   * Media on a message from history.
+   *
+   * The webhook path already does this; without it a picture fetched from
+   * history reads as the text "[image]" while the same message arriving live
+   * carries a downloadable file — an asymmetry invisible until someone tries
+   * to render a thread.
+   *
+   * The media fields on this response are unconfirmed, so their absence is
+   * treated as "no attachment" rather than an error. If TikTok names them
+   * differently, history simply stays text-only, exactly as before.
+   */
+  private restAttachments(rest: TikTokRestMessage, conversationId: string): Attachment[] {
+    return this.buildAttachments({
+      // Declared non-optional but never observed in full, so it is treated as
+      // possibly absent like every other field on this response.
+      label: rest.message_type?.toLowerCase() ?? "",
+      stickerUrl: rest.sticker?.url,
+      emojiUrl: rest.emoji?.url,
+      imageId: rest.image?.media_id,
+      videoId: rest.video?.media_id,
+      messageId: rest.message_id,
+      conversationId,
     });
   }
 

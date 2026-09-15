@@ -92,6 +92,7 @@ export type {
   TikTokThreadId,
   TikTokTokenResponse,
   TikTokTokens,
+  TikTokReadReceiptEvent,
   TikTokReferralEvent,
   TikTokWebhookConfig,
   TikTokWebhookContent,

@@ -78,6 +78,14 @@ export interface TikTokAdapterConfig {
    */
   onReferral?: (event: TikTokReferralEvent) => void | Promise<void>;
   /**
+   * Called when the user marks the conversation read.
+   *
+   * TikTok emits this only for personal accounts: a business reading its own
+   * thread produces nothing. Chat SDK has no inbound read-receipt event, so
+   * it is delivered here.
+   */
+  onReadReceipt?: (event: TikTokReadReceiptEvent) => void | Promise<void>;
+  /**
    * How many times to retry a request TikTok throttles. Defaults to 2;
    * `0` disables retrying.
    */
@@ -127,6 +135,18 @@ export interface TikTokWebhookConfig {
   appId: string;
   eventType: TikTokWebhookEventType;
   callbackUrl: string;
+}
+
+/** A user having read the conversation up to a point in time. */
+export interface TikTokReadReceiptEvent {
+  /** The conversation, as a Chat SDK thread ID. */
+  threadId: string;
+  businessId: string;
+  conversationId: string;
+  /** Everything sent before this instant has been seen. */
+  readAt: Date;
+  /** The full parsed payload, for anything not surfaced above. */
+  raw: TikTokMarkReadContent;
 }
 
 /** A user arriving through an ad or a tiktok.me link. */
@@ -406,6 +426,12 @@ export interface TikTokRestMessage {
   text?: { body?: string };
   /** UNCONFIRMED. */
   image?: { media_id?: string };
+  /** UNCONFIRMED. */
+  video?: { media_id?: string };
+  /** UNCONFIRMED. */
+  sticker?: { url?: string };
+  /** UNCONFIRMED. */
+  emoji?: { url?: string };
   /** UNCONFIRMED. */
   share_post?: { embed_url?: string; video_id?: string };
 }

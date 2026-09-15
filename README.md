@@ -89,6 +89,7 @@ surfacing later as an opaque API rejection.
 | `useTemplates` | `boolean` | `true` | Send fitting cards as native Q&A button cards. Set `false` to always send plain text |
 | `userName` | `string` | `"tiktok-bot"` | Display name for the bot |
 | `onReferral` | `(event) => void \| Promise<void>` | — | Called when a user arrives via an ad or tiktok.me link |
+| `onReadReceipt` | `(event) => void \| Promise<void>` | — | Called when the user marks the conversation read |
 | `maxRateLimitRetries` | `number` | `2` | Retries for a throttled request. `0` disables |
 | `rateLimitRetryDelayMs` | `number` | `1000` | First retry delay, doubling each attempt |
 | `signatureToleranceSeconds` | `number` | `5` | Permitted webhook timestamp drift. This is what prevents replay |
@@ -152,6 +153,24 @@ it is the only tolerance in play.
 Every adapter must belong to the same TikTok app as the router, since one app
 secret signs them all. `register()` refuses a mismatch rather than letting
 each of that adapter's deliveries fail.
+
+## Read receipts
+
+TikTok reports when the user has read the conversation. There is no Chat SDK
+event for this, so it arrives on a callback:
+
+```typescript
+createTikTokAdapter({
+  // ...credentials
+  onReadReceipt: async ({ threadId, readAt }) => {
+    await markSeen(threadId, readAt);
+  },
+});
+```
+
+Only personal accounts emit it — a business reading its own thread produces
+nothing — so it always means the other side saw your message. `readAt` is the
+point up to which everything has been read, not the time of a single message.
 
 ## Webhook configuration
 
@@ -275,7 +294,7 @@ different name, and the one every messaging call needs.
 | Outbound text | ✅ | Up to 6000 characters, checked before sending |
 | Cards and buttons | ✅ | Native Q&A button card, with a plain-text fallback |
 | Typing indicator | ✅ | Via `SENDER_ACTION` |
-| Read receipts | ✅ | `markAsRead()`, via `SENDER_ACTION` |
+| Read receipts (outbound) | ✅ | `markAsRead()`, via `SENDER_ACTION` |
 | Webhook verification | ✅ | HMAC-SHA256 over the raw body, fails closed |
 | Deduplication | ✅ | Survives retries and suppresses self-echoes |
 | Message history | ⚠️ | The 20 most recent messages; TikTok offers no pagination |
@@ -287,6 +306,7 @@ different name, and the one every messaging call needs.
 | Sharing your own posts | ✅ | `sharePost()`, by post ID — TikTok allows only your own |
 | Webhook configuration | ✅ | Register, read, and remove the callback URL programmatically |
 | Referral attribution | ✅ | `onReferral` reports the ad or link that started a conversation |
+| Read receipts (inbound) | ✅ | `onReadReceipt` reports when the user has read the thread |
 | Rate-limit backoff | ✅ | Bounded retry on TikTok's `40100` |
 | Many accounts on one endpoint | ✅ | `TikTokWebhookRouter`, with eager or lazy tenant resolution |
 | Stickers and emoji | ✅ | Received as attachments carrying their URL |
@@ -323,7 +343,10 @@ await thread.post({ files: [{ data: pngBuffer, filename: "chart.png", mimeType: 
 ```
 
 Inbound images and videos arrive as attachments whose bytes are **not**
-downloaded during parsing. Most messages are never asked for their media, the
+downloaded during parsing. History works the same way, with one caveat: the
+media field names on that response are ones TikTok has not published, so a
+message fetched from history degrades to text-only if they are named
+differently. Most messages are never asked for their media, the
 download URL takes a separate request, and it expires after 24 hours — so
 `fetchData()` defers all of that to the first caller that wants the file:
 

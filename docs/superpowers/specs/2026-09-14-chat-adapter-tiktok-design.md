@@ -133,6 +133,10 @@ can offer:
 
 - `/business/message/content/list/` has **no pagination** and returns only the
   20 most recent messages, so `fetchMessages` cannot honor arbitrary paging.
+  Its media field names are also unconfirmed, so history builds attachments
+  when they are present and stays text-only when they are not — a picture from
+  history should not read as bare text while the same message arriving live
+  carries a file, but nor should a guessed field name throw.
   This is also why `persistThreadHistory` should be enabled — the platform
   cannot serve history the way Slack can.
 - Conversation IDs are base64-like and may contain `+`, which must be
@@ -294,6 +298,20 @@ Two failure modes are answered differently on purpose. An unknown account is
 permanent, so it returns 200 and TikTok stops retrying. A resolver that throws
 is transient — a database blip — so it returns 503 and the delivery comes
 back. Collapsing them would either discard messages or replay them forever.
+
+### Read receipts
+
+`im_mark_read_msg` carries no message of its own, so like a referral it cannot
+travel the message path, and Chat SDK has no inbound read-receipt event. It
+goes to an `onReadReceipt` callback on the same terms: a host without one gets
+a debug line rather than silence, and a handler that throws is logged rather
+than surfaced, since a non-2xx answer would make TikTok replay a receipt that
+would fail identically.
+
+TikTok emits it only for personal accounts — a business reading its own thread
+produces nothing — so the event unambiguously means the other side saw the
+message. The timestamp is a high-water mark for the conversation rather than
+an acknowledgement of one message.
 
 ### Referral attribution
 

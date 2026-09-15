@@ -739,6 +739,202 @@ describe("TikTokAdapter", () => {
       expect(result.messages).toEqual([]);
     });
 
+    it("makes history media downloadable, as the webhook path does", async () => {
+      // Without this a picture from history read as the text "[image]" while
+      // the same message arriving live carried a file.
+      const calls = vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({
+            messages: [
+              restMessage({
+                message_type: "IMAGE",
+                text: undefined,
+                image: { media_id: "media_7" },
+              }),
+            ],
+            participants: [],
+          }),
+        )
+        .mockResolvedValueOnce(okResponse({ download_url: "https://cdn/h.png" }))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          arrayBuffer: async () => new Uint8Array([4, 4]).buffer,
+        });
+      const { adapter: local } = build(calls);
+
+      const result = await local.fetchMessages(threadFor(local));
+      const attachment = result.messages[0]?.attachments[0];
+
+      expect(attachment).toMatchObject({ type: "image" });
+      expect((await attachment?.fetchData?.()) as Buffer).toHaveLength(2);
+      expect(calls.mock.calls[1]?.[0]).toContain("media/download/");
+    });
+
+    it("exposes a history sticker by its URL", async () => {
+      const { adapter: local } = build(
+        listFetchOf([
+          restMessage({
+            message_type: "STICKER",
+            text: undefined,
+            sticker: { url: "https://cdn/s.png" },
+          }),
+        ]),
+      );
+
+      const result = await local.fetchMessages(threadFor(local));
+
+      expect(result.messages[0]?.attachments[0]).toMatchObject({
+        type: "image",
+        url: "https://cdn/s.png",
+      });
+    });
+
+    it("requests a VIDEO download for a history video", async () => {
+      const calls = vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({
+            messages: [
+              restMessage({
+                message_type: "VIDEO",
+                text: undefined,
+                video: { media_id: "media_v" },
+              }),
+            ],
+            participants: [],
+          }),
+        )
+        .mockResolvedValueOnce(okResponse({ download_url: "https://cdn/v.mp4" }))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          arrayBuffer: async () => new Uint8Array([5]).buffer,
+        });
+      const { adapter: local } = build(calls);
+
+      const result = await local.fetchMessages(threadFor(local));
+      const attachment = result.messages[0]?.attachments[0];
+
+      expect(attachment).toMatchObject({ type: "video" });
+      await attachment?.fetchData?.();
+      const body = JSON.parse((calls.mock.calls[1] as [string, RequestInit])[1].body as string);
+      expect(body.media_type).toBe("VIDEO");
+    });
+
+    it("exposes a history emoji by its URL", async () => {
+      const { adapter: local } = build(
+        listFetchOf([
+          restMessage({
+            message_type: "EMOJI",
+            text: undefined,
+            emoji: { url: "https://cdn/e.png" },
+          }),
+        ]),
+      );
+
+      const result = await local.fetchMessages(threadFor(local));
+
+      expect(result.messages[0]?.attachments[0]).toMatchObject({
+        type: "image",
+        url: "https://cdn/e.png",
+      });
+    });
+
+    it("keeps an entry whose type word is missing but whose media is not", async () => {
+      // `message_type` is declared non-optional yet was never observed in
+      // full. Reaching through it unguarded throws, and the entry is then
+      // dropped — losing a message whose media was perfectly usable.
+      const { adapter: local } = build(
+        listFetchOf([
+          {
+            message_id: "m_typeless",
+            sticker: { url: "https://cdn/s.png" },
+          },
+        ]),
+      );
+
+      const result = await local.fetchMessages(threadFor(local));
+
+      expect(result.messages).toHaveLength(1);
+      expect(result.messages[0]?.attachments[0]).toMatchObject({
+        name: "attachment.png",
+        url: "https://cdn/s.png",
+      });
+    });
+
+    it("keeps the rest of the page when one entry cannot be read", async () => {
+      // The response shape is unconfirmed, so one bad entry must not discard
+      // the other nineteen.
+      const { adapter: local } = build(
+        listFetchOf([
+          { message_id: "bad", message_type: { toLowerCase: null } },
+          restMessage({ message_id: "good" }),
+        ]),
+      );
+
+      const result = await local.fetchMessages(threadFor(local));
+
+      expect(result.messages.map((m) => m.id)).toEqual(["good"]);
+    });
+
+    it("downloads by the field that carried the ID, not the declared type", async () => {
+      // A payload whose type word disagrees with the field supplying the ID
+      // would otherwise request the wrong media_type and fail.
+      const calls = vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({
+            messages: [
+              restMessage({
+                message_type: "OTHER",
+                text: undefined,
+                image: { media_id: "media_x" },
+              }),
+            ],
+            participants: [],
+          }),
+        )
+        .mockResolvedValueOnce(okResponse({ download_url: "https://cdn/x.png" }))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          arrayBuffer: async () => new Uint8Array([1]).buffer,
+        });
+      const { adapter: local } = build(calls);
+
+      const result = await local.fetchMessages(threadFor(local));
+      const attachment = result.messages[0]?.attachments[0];
+
+      expect(attachment).toMatchObject({ type: "image" });
+      await attachment?.fetchData?.();
+      const body = JSON.parse((calls.mock.calls[1] as [string, RequestInit])[1].body as string);
+      expect(body.media_type).toBe("IMAGE");
+    });
+
+    it("leaves a text message from history without attachments", async () => {
+      const { adapter: local } = build(listFetchOf([restMessage()]));
+
+      const result = await local.fetchMessages(threadFor(local));
+
+      expect(result.messages[0]?.attachments).toEqual([]);
+    });
+
+    it("stays text-only when history omits the unconfirmed media fields", async () => {
+      // A degradation guard, not feature coverage: it pins the "fields absent
+      // → no attachment, no throw" contract, and would also pass if
+      // restAttachments were deleted entirely.
+      const { adapter: local } = build(
+        listFetchOf([restMessage({ message_type: "IMAGE", text: undefined })]),
+      );
+
+      const result = await local.fetchMessages(threadFor(local));
+
+      expect(result.messages[0]?.text).toBe("[image]");
+      expect(result.messages[0]?.attachments).toEqual([]);
+    });
+
     it("gives a usable date when history omits the timestamp", async () => {
       // `new Date(undefined)` is an Invalid Date, which corrupts ordering
       // silently because it compares false against everything.
@@ -968,6 +1164,208 @@ describe("TikTokAdapter", () => {
       ).rejects.toThrow();
       expect(alwaysThrottled).toHaveBeenCalledTimes(1);
       expect(slept).toEqual([]);
+    });
+  });
+
+  describe("read receipts", () => {
+    const readContent = {
+      from: "someuser",
+      to: "acmebrand",
+      unique_identifier: USER_ID,
+      from_user: { id: USER_ID, role: "personal_account" },
+      to_user: { id: BUSINESS_ID, role: "business_account" },
+      conversation_id: CONVERSATION_ID,
+      timestamp: 1_700_000_000_000,
+      read: { last_read_timestamp: 1_700_000_005_000 },
+    };
+
+    function buildWith(onReadReceipt?: (event: unknown) => void) {
+      const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+      const local = new TikTokAdapter({
+        appId: "app_1",
+        appSecret: APP_SECRET,
+        businessId: BUSINESS_ID,
+        accessToken: "access_1",
+        refreshToken: "refresh_1",
+        accessTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        onReadReceipt: onReadReceipt as never,
+        fetchImpl: vi.fn() as never,
+      });
+      return { local, logger };
+    }
+
+    it("reports when the user has read the conversation", async () => {
+      const seen: Array<Record<string, unknown>> = [];
+      const { local, logger } = buildWith((event) => {
+        seen.push(event as Record<string, unknown>);
+      });
+      await local.initialize({ getLogger: () => logger } as never);
+
+      const response = await local.handleWebhook(webhookRequest("im_mark_read_msg", readContent));
+
+      expect(response.status).toBe(200);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({
+        businessId: BUSINESS_ID,
+        conversationId: CONVERSATION_ID,
+        threadId: local.encodeThreadId({
+          businessId: BUSINESS_ID,
+          conversationId: CONVERSATION_ID,
+        }),
+      });
+      const readAt = seen[0]?.readAt as Date | undefined;
+      expect(readAt?.getTime()).toBe(1_700_000_005_000);
+    });
+
+    it("reaches the handler and not the message stream", async () => {
+      // Asserting only "no message" would pass with the feature deleted: an
+      // unhandled event also leaves the message stream empty. Both halves have
+      // to hold in one test for it to discriminate.
+      const seen: unknown[] = [];
+      const processed: unknown[] = [];
+      const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+      const local = new TikTokAdapter({
+        appId: "app_1",
+        appSecret: APP_SECRET,
+        businessId: BUSINESS_ID,
+        accessToken: "access_1",
+        refreshToken: "refresh_1",
+        accessTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        onReadReceipt: ((event: unknown) => seen.push(event)) as never,
+        fetchImpl: vi.fn() as never,
+      });
+      await local.initialize({
+        getLogger: () => logger,
+        processMessage: () => processed.push(true),
+      } as never);
+
+      await local.handleWebhook(webhookRequest("im_mark_read_msg", readContent));
+
+      expect(seen).toHaveLength(1);
+      expect(processed).toHaveLength(0);
+    });
+
+    it("refuses a receipt addressed to a different business", async () => {
+      // The same bug class that hit referrals: without the tenant check first,
+      // another account's receipt would be reported under this adapter's ID.
+      const seen: unknown[] = [];
+      const { local, logger } = buildWith((event) => seen.push(event));
+      await local.initialize({ getLogger: () => logger } as never);
+
+      const body = JSON.stringify({
+        client_key: "app_1",
+        event: "im_mark_read_msg",
+        create_time: Math.floor(Date.now() / 1000),
+        user_openid: "SOMEONE_ELSES_BUSINESS",
+        content: JSON.stringify(readContent),
+      });
+      const request = new Request("https://example.com/webhooks/tiktok", {
+        method: "POST",
+        headers: {
+          "tiktok-signature": signWebhookBody(body, APP_SECRET, Math.floor(Date.now() / 1000)),
+        },
+        body,
+      });
+
+      expect((await local.handleWebhook(request)).status).toBe(200);
+      expect(seen).toHaveLength(0);
+      expect(logger.warn).toHaveBeenCalled();
+    });
+
+    it("reports every receipt, since they carry no ID to deduplicate on", async () => {
+      // Receipts bypass the message dedupe deliberately. Routing them through
+      // it would key on an absent message_id and drop all but the first.
+      const seen: unknown[] = [];
+      const { local, logger } = buildWith((event) => seen.push(event));
+      await local.initialize({ getLogger: () => logger } as never);
+
+      await local.handleWebhook(webhookRequest("im_mark_read_msg", readContent));
+      await local.handleWebhook(webhookRequest("im_mark_read_msg", readContent));
+
+      expect(seen).toHaveLength(2);
+    });
+
+    it("drops a receipt it cannot date rather than assuming now", async () => {
+      // `toDate` falls back to the present, which is fine for a message's own
+      // timestamp and wrong for a high-water mark: it would mark messages read
+      // that were sent after the receipt was emitted.
+      const seen: unknown[] = [];
+      const { local, logger } = buildWith((event) => seen.push(event));
+      await local.initialize({ getLogger: () => logger } as never);
+
+      await local.handleWebhook(
+        webhookRequest("im_mark_read_msg", {
+          ...readContent,
+          read: { last_read_timestamp: "not-a-number" },
+        }),
+      );
+
+      expect(seen).toHaveLength(0);
+      expect(logger.debug).toHaveBeenCalledWith("Ignoring an incomplete TikTok read receipt");
+    });
+
+    it("accepts a numeric timestamp sent as a string", async () => {
+      // TikTok returns int64s as strings in several of its APIs.
+      const seen: Array<Record<string, unknown>> = [];
+      const { local, logger } = buildWith((event) => {
+        seen.push(event as Record<string, unknown>);
+      });
+      await local.initialize({ getLogger: () => logger } as never);
+
+      await local.handleWebhook(
+        webhookRequest("im_mark_read_msg", {
+          ...readContent,
+          read: { last_read_timestamp: "1700000005000" },
+        }),
+      );
+
+      const readAt = seen[0]?.readAt as Date | undefined;
+      expect(readAt?.getTime()).toBe(1_700_000_005_000);
+    });
+
+    it("logs the specific reason when no handler is configured", async () => {
+      // The generic ignored-event path also logs at debug, so a looser
+      // assertion would pass with the feature deleted.
+      const { local, logger } = buildWith(undefined);
+      await local.initialize({ getLogger: () => logger } as never);
+
+      await local.handleWebhook(webhookRequest("im_mark_read_msg", readContent));
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        "A TikTok read receipt arrived but no onReadReceipt is configured",
+        expect.anything(),
+      );
+    });
+
+    it("does not turn a failing handler into a retried webhook", async () => {
+      const { local, logger } = buildWith(() => {
+        throw new Error("handler blew up");
+      });
+      await local.initialize({ getLogger: () => logger } as never);
+
+      const response = await local.handleWebhook(webhookRequest("im_mark_read_msg", readContent));
+
+      expect(response.status).toBe(200);
+      expect(logger.error).toHaveBeenCalledWith(
+        "The onReadReceipt handler failed",
+        expect.anything(),
+      );
+    });
+
+    it.each([
+      ["no conversation", { conversation_id: "" }],
+      ["no read timestamp", { read: undefined }],
+    ])("ignores an incomplete receipt (%s)", async (_label, overrides) => {
+      const seen: unknown[] = [];
+      const { local, logger } = buildWith((event) => seen.push(event));
+      await local.initialize({ getLogger: () => logger } as never);
+
+      await local.handleWebhook(
+        webhookRequest("im_mark_read_msg", { ...readContent, ...overrides }),
+      );
+
+      expect(seen).toHaveLength(0);
+      expect(logger.debug).toHaveBeenCalledWith("Ignoring an incomplete TikTok read receipt");
     });
   });
 

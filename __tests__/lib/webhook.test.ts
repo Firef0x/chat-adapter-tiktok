@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { BoundedSet } from "../../src/lib/bounded-set.js";
 import {
+  DEFAULT_SIGNATURE_TOLERANCE_SECONDS,
   parseSignatureHeader,
   signWebhookBody,
   verifyWebhookSignature,
@@ -125,7 +126,7 @@ describe("verifyWebhookSignature", () => {
   });
 
   it("rejects a replayed request outside the tolerance", () => {
-    const header = validHeader(BODY, NOW_SECONDS - 60);
+    const header = validHeader(BODY, NOW_SECONDS - 3600);
     const result = verifyWebhookSignature({
       header,
       rawBody: BODY,
@@ -134,6 +135,73 @@ describe("verifyWebhookSignature", () => {
     });
     expect(result.valid).toBe(false);
     expect((result as { reason: string }).reason).toMatch(/away from local time/);
+  });
+
+  it("accepts drift exactly at the tolerance and rejects one second past it", () => {
+    // The boundary itself, which `>` and `>=` disagree about: a host sitting
+    // exactly on the limit must not flip between accepting and rejecting
+    // every one of its deliveries depending on which comparison was written.
+    const at = verifyWebhookSignature({
+      header: validHeader(BODY, NOW_SECONDS - 300),
+      rawBody: BODY,
+      appSecret: SECRET,
+      now: NOW_MS,
+      toleranceSeconds: 300,
+    });
+    expect(at.valid).toBe(true);
+
+    const past = verifyWebhookSignature({
+      header: validHeader(BODY, NOW_SECONDS - 301),
+      rawBody: BODY,
+      appSecret: SECRET,
+      now: NOW_MS,
+      toleranceSeconds: 300,
+    });
+    expect(past.valid).toBe(false);
+  });
+
+  it("defaults to a tolerance wide enough to survive ordinary delivery delay", () => {
+    // Five seconds — TikTok's sample value — makes a slow cold start or a
+    // lightly skewed clock reject every delivery, and each 401 makes TikTok
+    // replay the same already-stale timestamp.
+    expect(DEFAULT_SIGNATURE_TOLERANCE_SECONDS).toBeGreaterThanOrEqual(60);
+    expect(
+      verifyWebhookSignature({
+        header: validHeader(BODY, NOW_SECONDS - 45),
+        rawBody: BODY,
+        appSecret: SECRET,
+        now: NOW_MS,
+      }).valid,
+    ).toBe(true);
+  });
+
+  it("rejects a header whose timestamp is empty or not a positive integer", () => {
+    // `Number("")` is 0, which is finite: without an explicit check this
+    // parses as a valid epoch and is reported as a signature mismatch,
+    // pointing whoever debugs it at the app secret instead of the header.
+    for (const header of ["t=,s=abc", "t=abc,s=abc", "t=-1,s=abc", "t=1.5,s=abc"]) {
+      const result = verifyWebhookSignature({
+        header,
+        rawBody: BODY,
+        appSecret: SECRET,
+        now: NOW_MS,
+      });
+      expect(result.valid).toBe(false);
+      expect((result as { reason: string }).reason).toBe("malformed signature header");
+    }
+  });
+
+  it("tolerates whitespace around the header's parts", () => {
+    const signed = validHeader(BODY, NOW_SECONDS);
+    const [t, sig] = signed.split(",");
+    expect(
+      verifyWebhookSignature({
+        header: `${t} , ${sig} `,
+        rawBody: BODY,
+        appSecret: SECRET,
+        now: NOW_MS,
+      }).valid,
+    ).toBe(true);
   });
 
   it("tolerates small clock drift in both directions", () => {

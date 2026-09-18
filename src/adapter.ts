@@ -1,6 +1,14 @@
 import crypto from "node:crypto";
 
-import { extractCard, extractFiles, NetworkError, ValidationError } from "@chat-adapter/shared";
+import {
+  AdapterRateLimitError,
+  AuthenticationError,
+  extractCard,
+  extractFiles,
+  NetworkError,
+  PermissionError,
+  ValidationError,
+} from "@chat-adapter/shared";
 import type {
   Adapter,
   AdapterPostableMessage,
@@ -98,14 +106,57 @@ function extensionFromUrl(url: string): string | null {
 }
 
 /**
- * Convert a TikTok epoch-millisecond stamp to a Date.
+ * The earliest epoch-millisecond stamp treated as real: 2010-01-01.
  *
- * A missing or malformed value would otherwise produce an `Invalid Date`,
- * which throws no error and compares false against everything — silently
- * corrupting ordering downstream.
+ * A seconds-based stamp is finite and positive, so it passes every other
+ * check while decoding to 1970 — which then sorts to the front of a history
+ * page and displaces a genuine message. TikTok predates none of this, so any
+ * value below the threshold is a unit error rather than an old message.
  */
-function toDate(timestamp: number | undefined): Date {
-  return Number.isFinite(timestamp) ? new Date(timestamp as number) : new Date();
+const MIN_PLAUSIBLE_TIMESTAMP_MS = 1_262_304_000_000;
+
+/**
+ * Coerce a TikTok epoch-millisecond stamp, or `undefined` if it is unusable.
+ *
+ * `Number()` rather than a bare `Number.isFinite` check: TikTok returns
+ * int64s as strings in several of its APIs, and `Number.isFinite("173…")` is
+ * `false`, so a string stamp would be discarded as malformed.
+ *
+ * Returning `undefined` instead of a fabricated fallback is the point. A
+ * substituted "now" is indistinguishable from a real stamp downstream, sorts
+ * as the newest message in the thread, and survives the `limit` trim by
+ * evicting a genuine one. Callers decide what an absent time means for them.
+ */
+function parseTimestamp(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < MIN_PLAUSIBLE_TIMESTAMP_MS) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
+/**
+ * A delivery that failed for a reason a retry would resolve.
+ *
+ * TikTok retries anything that is not 2xx and permanently discards anything
+ * that is, so the two answers are irreversible in opposite directions. This
+ * distinguishes the cases worth replaying from the malformed ones that would
+ * fail identically forever. Not exported: it is an internal signal between
+ * `processEnvelope` and `handleVerifiedWebhook`.
+ */
+class TransientWebhookError extends Error {
+  constructor(
+    message: string,
+    readonly context: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "TransientWebhookError";
+  }
 }
 
 /**
@@ -162,6 +213,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
 
     this.tokens = new TikTokTokenManager({
       appId: config.appId,
+      clientKey: config.clientKey,
       appSecret: config.appSecret,
       businessId: config.businessId,
       accessToken: config.accessToken,
@@ -214,6 +266,26 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     return true;
   }
 
+  /**
+   * A usable epoch-millisecond stamp, or `fallback` with a warning.
+   *
+   * The warning is the whole point: substituting a timestamp is invisible
+   * downstream, so without it a renamed or re-typed TikTok field would
+   * silently date every message wrong and nothing would ever say so.
+   */
+  private timestampOr(value: unknown, fallback: number, field: string): number {
+    const parsed = parseTimestamp(value);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+
+    this.logger.warn("TikTok sent an unusable timestamp; substituting a fallback", {
+      field,
+      value,
+    });
+    return fallback;
+  }
+
   // -------------------------------------------------------------------------
   // Webhooks
   // -------------------------------------------------------------------------
@@ -244,10 +316,10 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
    *
    * Used by {@link TikTokWebhookRouter}, which verifies once for the whole
    * app. Re-verifying here would look like prudence and is in fact a bug: the
-   * signature carries a timestamp checked against a five-second tolerance, and
-   * the router may have spent that budget loading a tenant. The second check
-   * would then reject a delivery the first accepted, and since that answer is
-   * not 2xx, TikTok would retry it forever.
+   * signature carries a timestamp checked against a tolerance, and the router
+   * may have spent that budget loading a tenant. The second check would then
+   * reject a delivery the first accepted, and since that answer is not 2xx,
+   * TikTok would retry it forever.
    *
    * The caller is responsible for having verified against the same app secret.
    * That is why this is not exported from the package: reaching it requires
@@ -263,6 +335,17 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     try {
       await this.processEnvelope(rawBody, options);
     } catch (error) {
+      // The two answers are irreversible in opposite directions, so the error
+      // has to be classified rather than collapsed: 200 discards the delivery
+      // for good, and anything else asks TikTok to send it again.
+      if (error instanceof TransientWebhookError) {
+        this.logger.error(`${error.message} Asking TikTok to redeliver.`, {
+          ...error.context,
+          logId,
+        });
+        return new Response("Adapter not ready", { status: 503 });
+      }
+
       // A malformed payload must not trigger TikTok's retry loop — replaying
       // it would fail identically every time. The log carries TikTok's own
       // request identifier, which their support needs to trace a delivery.
@@ -311,9 +394,20 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       return;
     }
 
-    // Only these two carry a usable message. `im_receive_msg_eu` is
-    // deliberately stripped by TikTok — no content, no conversation ID — so
-    // there is nothing to deliver.
+    // A real customer message whose content TikTok strips for EEA, Swiss and
+    // UK users. Nothing can be delivered, but this is not a no-op event: a
+    // person messaged the account and will get no reply. Logged above `debug`
+    // because `debug` is off in production, which is exactly where somebody
+    // needs to know an entire region is going unanswered.
+    if (envelope.event === "im_receive_msg_eu") {
+      this.logger.warn(
+        "A TikTok message from an EEA, Swiss or UK user arrived with its content stripped; it cannot be delivered.",
+        { event: envelope.event, createTime: envelope.create_time },
+      );
+      return;
+    }
+
+    // Only these two carry a usable message.
     if (envelope.event !== "im_receive_msg" && envelope.event !== "im_send_msg") {
       this.logger.debug("Ignoring TikTok event", { event: envelope.event });
       return;
@@ -322,21 +416,27 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     // `content` is a JSON-encoded string, not an object.
     const content = JSON.parse(envelope.content) as TikTokMessageContent;
 
+    // Both fields are documented as always present, so an absence means the
+    // payload shape changed. At `debug` that would be invisible in production
+    // while every inbound message silently vanished.
     if (!content.message_id || !content.conversation_id) {
-      this.logger.debug("Ignoring TikTok event without a message", {
+      this.logger.warn("Ignoring a TikTok message with no ID or conversation", {
         event: envelope.event,
+        messageId: content.message_id,
+        conversationId: content.conversation_id,
       });
       return;
     }
 
-    // Without this the message is accepted, silently dropped, and — because
-    // it would already be recorded as seen — never recoverable on redelivery.
+    // Transient and self-healing: the listener is bound before initialize()
+    // finished, which a redelivery moments later would find resolved. The ID
+    // is not yet recorded as seen, so the retry genuinely works — which is
+    // why this asks for one instead of accepting the delivery and losing it.
     if (!this.chat) {
-      this.logger.error(
-        "TikTok adapter received a webhook before initialize() was called; the message was dropped.",
+      throw new TransientWebhookError(
+        "TikTok adapter received a webhook before initialize() was called.",
         { messageId: content.message_id, event: envelope.event },
       );
-      return;
     }
 
     // TikTok retries on any non-2xx, so the same message arrives repeatedly.
@@ -352,16 +452,28 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       conversationId: content.conversation_id,
     });
 
-    // Recorded only once dispatch is actually under way, so a message that
-    // never reached the host is not remembered as delivered.
+    // Recorded before dispatch so a redelivery arriving while this one is
+    // still in flight is not processed twice, and withdrawn again if dispatch
+    // fails — otherwise a host handler that threw would leave the message
+    // marked delivered, and TikTok's retry would be deduplicated away.
     this.seenMessages.add(content.message_id);
 
-    if (content.type === "reaction") {
-      this.dispatchReactions(this.chat, content, threadId, options);
-      return;
-    }
+    try {
+      if (content.type === "reaction") {
+        this.dispatchReactions(this.chat, content, threadId, options);
+        return;
+      }
 
-    await this.chat.processMessage(this, threadId, async () => this.parseMessage(content), options);
+      await this.chat.processMessage(
+        this,
+        threadId,
+        async () => this.parseMessage(content),
+        options,
+      );
+    } catch (error) {
+      this.seenMessages.delete(content.message_id);
+      throw error;
+    }
   }
 
   /**
@@ -420,16 +532,17 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
   private async dispatchReadReceipt(envelope: TikTokWebhookEnvelope): Promise<void> {
     const content = JSON.parse(envelope.content) as TikTokMarkReadContent;
 
-    // Coerced and validated here rather than deferred to `toDate`, whose
-    // fallback is "now". That is harmless for a message's own timestamp but
-    // wrong for a read receipt: this value is a high-water mark, so silently
-    // substituting the present marks more as read than the user read —
-    // including messages sent after the receipt was emitted. TikTok returns
-    // int64s as strings in several of its APIs, so a string is plausible.
-    const readMs = Number(content.read?.last_read_timestamp);
+    // A read receipt is a high-water mark, so an unusable stamp must not
+    // degrade to the present: that would mark more as read than the user
+    // read, including messages sent after the receipt was emitted. Zero and
+    // negative values are rejected by the same plausibility floor.
+    const readMs = parseTimestamp(content.read?.last_read_timestamp);
 
-    if (!content.conversation_id || !Number.isFinite(readMs) || readMs <= 0) {
-      this.logger.debug("Ignoring an incomplete TikTok read receipt");
+    if (!content.conversation_id || readMs === undefined) {
+      this.logger.warn("Ignoring an incomplete TikTok read receipt", {
+        conversationId: content.conversation_id,
+        lastReadTimestamp: content.read?.last_read_timestamp,
+      });
       return;
     }
 
@@ -547,14 +660,43 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     }
 
     const isFromBusiness = content.from_user?.id === this.config.businessId;
-    return isFromBusiness && content.message_tag?.source === "API";
+    if (!isFromBusiness) {
+      return false;
+    }
+
+    // `message_tag` is documented as always present. If it ever is not, the
+    // two possible mistakes are not equally bad: treating our own message as
+    // the customer's makes the bot answer itself, and each answer echoes back
+    // to start another round. Suppressing a colleague's message costs one
+    // message; the loop costs the messaging window. So this fails closed.
+    if (!content.message_tag) {
+      this.logger.warn(
+        "A TikTok message from this business account carried no message_tag; treating it as our own echo.",
+        { messageId: content.message_id },
+      );
+      return true;
+    }
+
+    return content.message_tag.source === "API";
   }
 
   /** The sender of an inbound payload, shared by messages and reactions. */
   private authorOf(content: TikTokMessageContent): Author {
     const isOwnEcho = this.isOwnEcho(content);
+    const userId = content.from_user?.id ?? content.unique_identifier ?? "";
+
+    // An empty ID is a plausible-looking identity that every unidentifiable
+    // sender shares, so any per-user state the host keeps collides between
+    // strangers. Both fields are documented as present, so this is a shape
+    // change rather than an ordinary message.
+    if (!userId) {
+      this.logger.warn("A TikTok message carried no sender identity", {
+        messageId: content.message_id,
+      });
+    }
+
     return {
-      userId: content.from_user?.id ?? content.unique_identifier ?? "",
+      userId,
       userName: content.from ?? "",
       fullName: content.from ?? "",
       isBot: isOwnEcho,
@@ -577,7 +719,10 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       raw,
       author: this.authorOf(content),
       metadata: {
-        dateSent: toDate(content.timestamp),
+        // A live webhook is being handled right now, so receipt time is a
+        // sound stand-in for a missing stamp — unlike in history, where it
+        // would reorder the page. The warning is what makes it diagnosable.
+        dateSent: new Date(this.timestampOr(content.timestamp, Date.now(), "message")),
         edited: false,
       },
       attachments: this.inboundAttachments(content),
@@ -649,6 +794,14 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     const isImage = Boolean(media.imageId);
     const mediaId = media.imageId ?? media.videoId;
     if (!mediaId) {
+      // The host gets text reading "[image]" and no file. Absence is expected
+      // on the history response, whose media field names are unconfirmed, but
+      // on a webhook it means a documented field went missing — and either
+      // way the host is left showing a placeholder for nothing.
+      this.logger.warn("A TikTok media message carried no media ID; sending it without a file", {
+        label: media.label,
+        messageId: media.messageId,
+      });
       return [];
     }
 
@@ -828,7 +981,29 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     // Region-gated on both sides of the conversation, so it is checked per
     // conversation. Skipping the check turns an unsupported region into an
     // opaque parameter error.
-    if (!(await canSendImage(this.api, this.config.businessId, conversationId))) {
+    const capability = await canSendImage(
+      this.api,
+      this.config.businessId,
+      conversationId,
+      this.config.conversationType,
+    );
+
+    if (!capability.known) {
+      // Claiming a region gate here would be a guess, and a confident one:
+      // it sends whoever reads it to investigate participant geography when
+      // the actual fact is that TikTok reported nothing about this
+      // capability — a renamed field, or the wrong conversation type probed.
+      this.logger.warn("TikTok returned no image capability for this conversation", {
+        conversationId,
+        conversationType: this.config.conversationType ?? "SINGLE",
+      });
+      throw new ValidationError(
+        ADAPTER_NAME,
+        'TikTok did not report whether this conversation can receive images. If it is a first-contact conversation, set conversationType to "STRANGER".',
+      );
+    }
+
+    if (!capability.allowed) {
       throw new ValidationError(
         ADAPTER_NAME,
         "This conversation cannot receive images. TikTok gates image support by the regions of both participants.",
@@ -1014,12 +1189,20 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     });
 
     const messages: Array<Message<TikTokRawMessage>> = [];
+    // An entry with no usable stamp inherits the previous entry's. Dating it
+    // "now" instead would sort it newest and let it survive the `limit` trim
+    // by evicting a real message; carrying the last known value forward keeps
+    // it beside the neighbour it arrived next to, which is the best available
+    // evidence of where it belongs. The sort below is stable, so ties hold
+    // that order.
+    let lastKnownMs = 0;
     for (const rest of data.messages ?? []) {
       // Per entry, because this response's shape is unconfirmed: one entry
       // that cannot be read should not discard the other nineteen.
       try {
-        const parsed = this.parseRestMessage(rest, conversationId);
+        const parsed = this.parseRestMessage(rest, conversationId, lastKnownMs);
         if (parsed) {
+          lastKnownMs = parsed.metadata.dateSent.getTime();
           messages.push(parsed);
         }
       } catch (error) {
@@ -1058,6 +1241,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
   private parseRestMessage(
     rest: TikTokRestMessage,
     conversationId: string,
+    fallbackMs: number,
   ): Message<TikTokRawMessage> | null {
     if (!rest.message_id) {
       this.logger.warn("Skipping TikTok history entry with no message_id");
@@ -1082,7 +1266,10 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
         isBot: "unknown",
         isMe: false,
       },
-      metadata: { dateSent: toDate(rest.timestamp), edited: false },
+      metadata: {
+        dateSent: new Date(this.timestampOr(rest.timestamp, fallbackMs, "history message")),
+        edited: false,
+      },
       attachments: this.restAttachments(rest, conversationId),
     });
   }
@@ -1133,6 +1320,14 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       case "TEMPLATE":
         return "[template]";
       default:
+        // Logged for the same reason the webhook path logs it: a type TikTok
+        // adds shows up in live traffic and in history, and without this the
+        // history half is invisible — a whole conversation can be summarized
+        // as "[unsupported message]" with nothing to say why.
+        this.logger.warn("Unrecognized TikTok message type in history", {
+          messageType: rest.message_type,
+          messageId: rest.message_id,
+        });
         return "[unsupported message]";
     }
   }
@@ -1166,7 +1361,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       path: "business/message/conversation/list/",
       query: {
         business_id: this.config.businessId,
-        conversation_type: options?.conversationType ?? "SINGLE",
+        conversation_type: options?.conversationType ?? this.config.conversationType ?? "SINGLE",
         cursor: options?.cursor,
         limit: options?.limit,
       },
@@ -1183,11 +1378,21 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
    * {@link listConversations} when the identifiers alone would do.
    *
    * A conversation whose messages cannot be read is skipped rather than
-   * failing the page: one inaccessible thread should not hide the rest.
+   * failing the page: one inaccessible thread should not hide the rest. An
+   * account-wide failure is **not** skipped — see the loop below.
+   *
+   * `rootMessage` is the conversation's **most recent** message, not its
+   * first. Obtaining the first would mean paging the entire history of every
+   * conversation on the page; the newest is one request and is what a thread
+   * list is normally rendered from.
+   *
+   * Only `SINGLE` conversations are listed unless `conversationType` says
+   * otherwise. A first-contact DM from a non-follower is a `STRANGER`
+   * conversation and is invisible to the default.
    */
   async listThreads(
     channelId: string,
-    options?: ListThreadsOptions,
+    options?: ListThreadsOptions & { conversationType?: TikTokConversationType },
   ): Promise<ListThreadsResult<TikTokRawMessage>> {
     const businessId = decodeChannelId(channelId);
     if (businessId !== this.config.businessId) {
@@ -1201,6 +1406,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     const page = await this.listConversations({
       cursor: options?.cursor ? Number(options.cursor) : undefined,
       limit,
+      conversationType: options?.conversationType,
     });
 
     const threads: Array<ThreadSummary<TikTokRawMessage>> = [];
@@ -1221,19 +1427,43 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
         const { messages } = await this.fetchMessages(threadId, { limit: 1 });
         rootMessage = messages[0];
       } catch (error) {
+        // Skipping is right for a problem with *this* conversation and wrong
+        // for one with the connection: an expired refresh token throws for
+        // every conversation on the page, and swallowing each one turns a
+        // dead integration into an empty list the caller cannot tell from an
+        // account with no conversations.
+        if (
+          error instanceof AuthenticationError ||
+          error instanceof PermissionError ||
+          error instanceof AdapterRateLimitError
+        ) {
+          throw error;
+        }
+
         this.logger.warn("Could not read a TikTok conversation while listing", {
+          conversationId: conversation.conversation_id,
           error,
         });
         continue;
       }
 
-      if (rootMessage) {
-        threads.push({
-          id: threadId,
-          rootMessage,
-          lastReplyAt: toDate(conversation.update_time),
+      if (!rootMessage) {
+        // `ThreadSummary` requires a root message, so this conversation
+        // cannot be reported. Logged because the caller otherwise receives a
+        // short page with nothing to explain it.
+        this.logger.warn("Skipping a TikTok conversation whose history is empty", {
+          conversationId: conversation.conversation_id,
         });
+        continue;
       }
+
+      threads.push({
+        id: threadId,
+        rootMessage,
+        lastReplyAt: new Date(
+          this.timestampOr(conversation.update_time, Date.now(), "conversation update_time"),
+        ),
+      });
     }
 
     return {
@@ -1250,6 +1480,16 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
    */
   async fetchChannelInfo(channelId: string): Promise<ChannelInfo> {
     const businessId = decodeChannelId(channelId);
+    // Same guard as `listThreads`. Without it a multi-tenant host that passes
+    // tenant B's channel to tenant A's adapter queries another account with
+    // this connection's credentials, and gets either the wrong profile or an
+    // opaque permission error instead of being told what it did.
+    if (businessId !== this.config.businessId) {
+      throw new ValidationError(
+        ADAPTER_NAME,
+        `This adapter is connected to a different business account than ${channelId}.`,
+      );
+    }
 
     const profile = await this.api.request<TikTokBusinessProfile>({
       method: "GET",

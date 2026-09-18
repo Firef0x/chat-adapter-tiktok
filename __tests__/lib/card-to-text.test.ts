@@ -173,3 +173,96 @@ describe("cardToPlainText", () => {
     expect(text).toBe("Title\nBody");
   });
 });
+
+describe("cardToPlainText — elements the review found untested", () => {
+  it("prefixes each option with a bullet so a list reads as a list", () => {
+    // The whole module exists to make options readable as choices. Asserting
+    // with `toContain("Yes please")` holds with or without the bullet, so the
+    // exact string is what pins it.
+    const text = cardToPlainText(
+      card({
+        children: [
+          {
+            type: "actions",
+            children: [{ type: "button", label: "Yes please", value: "yes" }],
+          },
+        ],
+      } as never),
+    );
+
+    expect(text).toContain("• Yes please");
+  });
+
+  it("renders a radio select the same way as a plain select", () => {
+    // Both share one arm; only `select` was exercised, so the shared path
+    // could stop handling `radio_select` unnoticed.
+    const text = cardToPlainText(
+      card({
+        children: [
+          {
+            type: "actions",
+            children: [
+              {
+                type: "radio_select",
+                label: "Size",
+                options: [
+                  { label: "Small", value: "s" },
+                  { label: "Large", value: "l" },
+                ],
+              },
+            ],
+          },
+        ],
+      } as never),
+    );
+
+    expect(text).toContain("Size:");
+    expect(text).toContain("• Small");
+    expect(text).toContain("• Large");
+  });
+
+  it("renders a table rather than dropping it", () => {
+    const text = cardToPlainText(
+      card({
+        children: [
+          {
+            type: "table",
+            headers: ["Item", "Price"],
+            rows: [["Coffee", "$3"]],
+          },
+        ],
+      } as never),
+    );
+
+    expect(text).toContain("Item");
+    expect(text).toContain("Coffee");
+    expect(text).toContain("$3");
+  });
+
+  it("names a chart instead of leaving a silent gap", () => {
+    // TikTok cannot render one, so the reader needs to know something visual
+    // was meant to be there.
+    const text = cardToPlainText(card({ children: [{ type: "chart" }] } as never));
+
+    expect(text).toContain("[chart]");
+  });
+
+  it("omits a disabled button rather than offering an untakeable choice", () => {
+    const text = cardToPlainText(
+      card({
+        children: [
+          {
+            type: "actions",
+            children: [
+              { type: "button", label: "Available", value: "a" },
+              { type: "button", label: "Sold out", value: "b", disabled: true },
+            ],
+          },
+        ],
+      } as never),
+    );
+
+    expect(text).toContain("• Available");
+    expect(text).not.toContain("Sold out");
+  });
+});

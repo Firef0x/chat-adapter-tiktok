@@ -179,18 +179,30 @@ export async function fetchUrlBytes(url: string, fetchImpl: typeof fetch = fetch
   return Buffer.from(await response.arrayBuffer());
 }
 
+/** What TikTok said about a capability, distinguishing "no" from "no answer". */
+export interface CapabilityAnswer {
+  /** Whether TikTok reported on this capability at all. */
+  known: boolean;
+  /** Whether it is permitted. Meaningless unless `known`. */
+  allowed: boolean;
+}
+
 /**
  * Ask whether images may be sent in this conversation.
  *
  * Image support is region-gated on both sides of the conversation, so it has
  * to be checked per conversation rather than once per account.
+ *
+ * `conversationType` must match the conversation being asked about: a
+ * first-contact DM from a non-follower is `STRANGER`, and probing it as
+ * `SINGLE` asks about a conversation that does not exist.
  */
 export async function canSendImage(
   client: TikTokApiClient,
   businessId: string,
   conversationId: string,
   conversationType: TikTokConversationType = "SINGLE",
-): Promise<boolean> {
+): Promise<CapabilityAnswer> {
   const data = await client.request<TikTokCapabilityData>({
     method: "GET",
     path: "business/message/capabilities/get/",
@@ -204,7 +216,11 @@ export async function canSendImage(
     },
   });
 
-  return (data.capability_infos ?? []).some(
-    (info) => info.capability_type === "IMAGE_SEND" && info.capability_result,
-  );
+  const infos = data.capability_infos ?? [];
+  const entry = infos.find((info) => info.capability_type === "IMAGE_SEND");
+
+  // An explicit denial and a missing answer are different facts, and the
+  // caller phrases a different error for each: "TikTok says no" is actionable
+  // in a way that "TikTok said nothing about it" is not.
+  return { known: entry !== undefined, allowed: entry?.capability_result === true };
 }

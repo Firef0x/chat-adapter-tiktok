@@ -247,3 +247,43 @@ describe("TikTokTokenManager", () => {
     await expect(manager.getAccessToken()).resolves.toBe("access_new");
   });
 });
+
+describe("TikTokTokenManager — refresh boundary", () => {
+  it("refreshes exactly at the skew boundary rather than one millisecond later", async () => {
+    // `<` and `<=` disagree only here, and the whole point of the skew is
+    // that a request must not leave with a token about to expire in flight.
+    const now = 1_700_000_000_000;
+    const refreshed = vi.fn(async () => ({
+      status: 200,
+      json: async () => ({
+        code: 0,
+        message: "OK",
+        request_id: "req_1",
+        data: {
+          access_token: "access_2",
+          refresh_token: "refresh_2",
+          expires_in: 86_400,
+          refresh_token_expires_in: 31_536_000,
+          open_id: "biz_1",
+          scope: "user.info.basic",
+        },
+      }),
+    }));
+
+    const manager = new TikTokTokenManager({
+      appId: "app_1",
+      appSecret: "secret_1",
+      businessId: "biz_1",
+      accessToken: "access_1",
+      refreshToken: "refresh_1",
+      // Exactly the skew window: the token has not expired, but it would
+      // during a request, so it must be renewed now.
+      accessTokenExpiresAt: now + REFRESH_SKEW_MS,
+      now: () => now,
+      fetchImpl: refreshed as never,
+    } as never);
+
+    await expect(manager.getAccessToken()).resolves.toBe("access_2");
+    expect(refreshed).toHaveBeenCalledTimes(1);
+  });
+});

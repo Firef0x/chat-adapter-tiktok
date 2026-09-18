@@ -38,6 +38,19 @@ export class BoundedSet {
     return this.items.has(value);
   }
 
+  /**
+   * Forget a value.
+   *
+   * Lets a caller withdraw a record it made speculatively — the adapter marks
+   * a message seen before dispatching it, and must take that back if dispatch
+   * fails, or TikTok's redelivery would be deduplicated away.
+   *
+   * @returns `true` if it was present.
+   */
+  delete(value: string): boolean {
+    return this.items.delete(value);
+  }
+
   get size(): number {
     return this.items.size;
   }

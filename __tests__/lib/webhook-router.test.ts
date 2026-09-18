@@ -260,6 +260,41 @@ describe("TikTokWebhookRouter", () => {
     expect(router.registered).toEqual([]);
   });
 
+  it("refuses an adapter whose secret differs but is the same length", () => {
+    // The lengths match exactly, so only the constant-time comparison of the
+    // bytes separates them. A length check alone would admit any foreign
+    // adapter whose secret happened to be the same size.
+    const sameLength = "app_secret_valuf";
+    expect(sameLength).toHaveLength(APP_SECRET.length);
+    expect(sameLength).not.toBe(APP_SECRET);
+
+    const foreign = new TikTokAdapter({
+      appId: "app_1",
+      appSecret: sameLength,
+      businessId: BIZ_B,
+      accessToken: "access_1",
+      refreshToken: "refresh_1",
+      fetchImpl: vi.fn() as never,
+    });
+
+    expect(() => router.register(foreign)).toThrow(/different app secret/);
+    expect(router.registered).toEqual([]);
+  });
+
+  it("warns when a registration replaces an existing adapter", async () => {
+    // Silently replacing one is how a stale adapter keeps serving a tenant
+    // after a re-registration that looked like it worked.
+    const first = adapterFor(BIZ_A);
+    const second = adapterFor(BIZ_A);
+    router.register(first.adapter);
+    router.register(second.adapter);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Replacing an already-registered TikTok adapter",
+      expect.objectContaining({ businessId: BIZ_A }),
+    );
+  });
+
   it("refuses an empty app secret", () => {
     // `createHmac` accepts an empty key, so every forged delivery would verify.
     expect(() => new TikTokWebhookRouter({ appSecret: "" })).toThrow(/appSecret is required/);
@@ -268,6 +303,10 @@ describe("TikTokWebhookRouter", () => {
   it("names the business account when a delivery is discarded", async () => {
     // This path drops the message permanently; without the account, "tenant X
     // went quiet" cannot be diagnosed from the logs.
+    const a = adapterFor(BIZ_A);
+    await a.adapter.initialize(a.chat as never);
+    router.register(a.adapter);
+
     await router.handleWebhook(deliveryFor("biz_stranger"));
 
     expect(logger.warn).toHaveBeenCalledWith(
@@ -312,10 +351,55 @@ describe("TikTokWebhookRouter", () => {
 
   it("answers 200 for an account nobody owns, so TikTok stops retrying", async () => {
     // "Not ours" is permanent; a non-2xx would buy an endless replay.
+    const a = adapterFor(BIZ_A);
+    await a.adapter.initialize(a.chat as never);
+    router.register(a.adapter);
+
     const response = await router.handleWebhook(deliveryFor("biz_stranger"));
 
     expect(response.status).toBe(200);
     expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("answers 503 when nothing is registered and there is no resolver", async () => {
+    // Not an answer about this account — a router that is not wired up yet,
+    // which a delivery moments later would find ready. Discarding these
+    // permanently loses every message that arrives during startup.
+    const response = await router.handleWebhook(deliveryFor(BIZ_A));
+
+    expect(response.status).toBe(503);
+    expect(logger.error).toHaveBeenCalledWith(
+      "A TikTok webhook arrived before any adapter was registered",
+      expect.objectContaining({ businessId: BIZ_A }),
+    );
+  });
+
+  it("refuses a resolved adapter from another app without throwing out of the handler", async () => {
+    // `register` throws at wiring time, where an operator sees it. At request
+    // time an escaping exception becomes a 500 and TikTok retries a
+    // misconfiguration that can never succeed.
+    const foreign = new TikTokAdapter({
+      appId: "app_1",
+      appSecret: "another-secret!!",
+      businessId: BIZ_B,
+      accessToken: "access_1",
+      refreshToken: "refresh_1",
+      accessTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+      fetchImpl: vi.fn(async () => okResponse({})) as never,
+    });
+    const lazy = new TikTokWebhookRouter({
+      appSecret: APP_SECRET,
+      resolve: () => foreign,
+      logger: logger as never,
+    });
+
+    const response = await lazy.handleWebhook(deliveryFor(BIZ_B));
+
+    expect(response.status).toBe(200);
+    expect(logger.error).toHaveBeenCalledWith(
+      "A resolved TikTok adapter belongs to a different app",
+      expect.objectContaining({ businessId: BIZ_B }),
+    );
   });
 
   it("answers 503 when the resolver itself fails, so the message is retried", async () => {

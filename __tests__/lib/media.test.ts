@@ -66,6 +66,52 @@ describe("uploadImage", () => {
     expect((init.body as FormData).get("business_id")).toBe("biz_1");
   });
 
+  it("sends the bytes under the field name TikTok reads", async () => {
+    // The field name is the whole contract of a multipart upload: get it
+    // wrong and every image send fails at the API while the suite stays
+    // green, because nothing else about the request changes.
+    const fetchImpl = vi.fn(async () => okResponse({ media_id: "m_1" }));
+
+    await uploadImage(clientWith(fetchImpl), {
+      businessId: "biz_1",
+      data: Buffer.from("png-bytes"),
+      mimeType: "image/png",
+      filename: "shot.png",
+    });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const file = (init.body as FormData).get("file");
+    expect(file).toBeInstanceOf(Blob);
+    expect((file as File).name).toBe("shot.png");
+    expect((file as Blob).type).toBe("image/png");
+    expect(await (file as Blob).text()).toBe("png-bytes");
+  });
+
+  it("names the part after the caller's file, or falls back", async () => {
+    const fetchImpl = vi.fn(async () => okResponse({ media_id: "m_1" }));
+    await uploadImage(clientWith(fetchImpl), {
+      businessId: "biz_1",
+      data: Buffer.from("x"),
+      mimeType: "image/png",
+    });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(((init.body as FormData).get("file") as File).name).toBe("image");
+  });
+
+  it("defaults an unstated type to JPEG", async () => {
+    // The default decides which bytes TikTok is told it is receiving, so it
+    // is part of the wire format rather than a convenience.
+    const fetchImpl = vi.fn(async () => okResponse({ media_id: "m_1" }));
+    await uploadImage(clientWith(fetchImpl), {
+      businessId: "biz_1",
+      data: Buffer.from("x"),
+    });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(((init.body as FormData).get("file") as Blob).type).toBe("image/jpeg");
+  });
+
   it("rejects an unsupported type before uploading", async () => {
     // TikTok answers with a generic parameter error that names no rule.
     const fetchImpl = vi.fn();
@@ -175,8 +221,58 @@ describe("canSendImage", () => {
       }),
     );
 
-    await expect(canSendImage(clientWith(granted), "biz_1", "c_1")).resolves.toBe(true);
-    await expect(canSendImage(clientWith(denied), "biz_1", "c_1")).resolves.toBe(false);
+    await expect(canSendImage(clientWith(granted), "biz_1", "c_1")).resolves.toEqual({
+      known: true,
+      allowed: true,
+    });
+    await expect(canSendImage(clientWith(denied), "biz_1", "c_1")).resolves.toEqual({
+      known: true,
+      allowed: false,
+    });
+  });
+
+  it("reads IMAGE_SEND rather than whichever capability came back first", async () => {
+    // A response that grants a *different* capability and says nothing about
+    // IMAGE_SEND. Without the capability_type check this reads as permission
+    // to send images, and every send fails at the API instead.
+    const other = vi.fn(async () =>
+      okResponse({
+        capability_infos: [{ capability_type: "VIDEO_SEND", capability_result: true }],
+      }),
+    );
+
+    await expect(canSendImage(clientWith(other), "biz_1", "c_1")).resolves.toEqual({
+      known: false,
+      allowed: false,
+    });
+  });
+
+  it("separates an explicit denial from no answer at all", async () => {
+    // The two demand different messages to the operator: one is a real region
+    // gate, the other means the probe asked about the wrong thing.
+    const denied = vi.fn(async () =>
+      okResponse({
+        capability_infos: [{ capability_type: "IMAGE_SEND", capability_result: false }],
+      }),
+    );
+
+    await expect(canSendImage(clientWith(denied), "biz_1", "c_1")).resolves.toEqual({
+      known: true,
+      allowed: false,
+    });
+    await expect(
+      canSendImage(clientWith(vi.fn(async () => okResponse({}))), "biz_1", "c_1"),
+    ).resolves.toEqual({ known: false, allowed: false });
+  });
+
+  it("probes the conversation type it was given", async () => {
+    // A first-contact DM is a STRANGER conversation; probing it as SINGLE
+    // asks about a conversation that does not exist.
+    const fetchImpl = vi.fn(async () => okResponse({ capability_infos: [] }));
+    await canSendImage(clientWith(fetchImpl), "biz_1", "c_1", "STRANGER");
+
+    const url = new URL(fetchImpl.mock.calls[0]?.[0] as string);
+    expect(url.searchParams.get("conversation_type")).toBe("STRANGER");
   });
 
   it("sends capability_types as a JSON array in the query", async () => {
@@ -190,7 +286,7 @@ describe("canSendImage", () => {
   it("treats an empty capability list as not permitted", async () => {
     await expect(
       canSendImage(clientWith(vi.fn(async () => okResponse({}))), "biz_1", "c_1"),
-    ).resolves.toBe(false);
+    ).resolves.toEqual({ known: false, allowed: false });
   });
 });
 

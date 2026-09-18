@@ -30,8 +30,28 @@ export interface TikTokTokens {
 
 /** Configuration for the TikTok adapter. */
 export interface TikTokAdapterConfig {
-  /** App ID from the TikTok developer portal (`client_id` on the token leg). */
+  /**
+   * App ID from the TikTok developer portal.
+   *
+   * Sent as `app_id` to token inspection and webhook configuration. It is
+   * **not** used on the OAuth leg unless {@link TikTokAdapterConfig.clientKey}
+   * is omitted — see that field.
+   */
   appId: string;
+  /**
+   * The value TikTok's OAuth endpoints call `client_key` and `client_id`.
+   * Defaults to `appId`.
+   *
+   * TikTok names one application three ways, and whether they are the same
+   * string depends on the app: some developer portals issue a single value,
+   * others a distinct **App ID** and **Client Key**. Set this when they
+   * differ — the adapter's token refresh is on the OAuth leg, so it needs the
+   * client key, while `getTokenInfo` and the webhook-configuration helpers
+   * need the app ID.
+   *
+   * Leaving it unset keeps the previous behaviour of using `appId` for both.
+   */
+  clientKey?: string;
   /** App secret from the TikTok developer portal. Also signs webhooks. */
   appSecret: string;
   /**
@@ -107,15 +127,30 @@ export interface TikTokAdapterConfig {
    * always degrade to plain text, which every account can send.
    */
   useTemplates?: boolean;
+  /**
+   * Which kind of conversation this account's traffic is. Defaults to
+   * `"SINGLE"`.
+   *
+   * TikTok treats a first-contact DM from someone who does not follow the
+   * account as a `STRANGER` conversation, and both the conversation list and
+   * the image-capability probe take the type as a parameter. An account whose
+   * inbound traffic is mostly non-followers will see an empty thread list and
+   * unexplained image refusals under the default.
+   */
+  conversationType?: TikTokConversationType;
   /** Override the API host. Intended for testing. */
   baseUrl?: string;
   /** API version segment. Defaults to `"v1.3"`. */
   apiVersion?: string;
   /**
    * How far a webhook's signature timestamp may drift from local time, in
-   * seconds. Defaults to 5, matching TikTok's own sample. Raise it only if
-   * your hosts have unreliable clocks — the tolerance is what stops an
-   * intercepted request from being replayed later.
+   * seconds. Defaults to 300.
+   *
+   * The budget covers network transit, a cold start, time queued behind other
+   * work and any clock skew, and it is spent before verification rather than
+   * after. Lowering it tightens the replay window at the cost of rejecting
+   * slow deliveries — and a rejection is answered 401, which makes TikTok
+   * replay the same already-stale timestamp until it gives up.
    */
   signatureToleranceSeconds?: number;
   logger?: Logger;
@@ -574,7 +609,14 @@ export interface TikTokMessageContent extends TikTokContentBase {
   /** `0` means a normal conversation. */
   scene_type: number;
   is_follower: boolean;
-  message_tag: {
+  /**
+   * The surface the message was sent from.
+   *
+   * Documented as always present. Optional here because the echo guard in
+   * {@link TikTokAdapter} must handle its absence, and a non-optional type
+   * would hide that case behind a `?.` that silently reads as "not an echo".
+   */
+  message_tag?: {
     source: "APP" | "WEB" | "API" | "OTHERS" | "UNKNOWN_SOURCE";
   };
 }

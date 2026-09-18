@@ -1,4 +1,5 @@
 import { ValidationError } from "@chat-adapter/shared";
+import type { AdapterPostableMessage } from "chat";
 import { NotImplementedError } from "chat";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -263,16 +264,59 @@ describe("TikTokAdapter", () => {
       expect(logger.error).toHaveBeenCalled();
     });
 
-    it("reports a webhook that arrives before initialize instead of eating it", async () => {
-      // Silently dropping it would also poison the dedupe cache, so even a
-      // redelivery could never recover the message.
-      const { adapter: uninitialized } = build();
+    it("asks TikTok to redeliver a webhook that arrives before initialize", async () => {
+      // Transient and self-healing: a redelivery moments later finds the
+      // adapter ready. Answering 200 would discard the message permanently,
+      // and the ID is deliberately not recorded as seen so the retry works.
+      const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+      const uninitialized = new TikTokAdapter({
+        appId: "app_1",
+        appSecret: APP_SECRET,
+        businessId: BUSINESS_ID,
+        accessToken: "access_1",
+        refreshToken: "refresh_1",
+        accessTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        logger: logger as never,
+        fetchImpl: vi.fn(async () => okResponse({})) as never,
+      });
 
       const response = await uninitialized.handleWebhook(
         webhookRequest("im_receive_msg", messageContent()),
       );
 
-      expect(response.status).toBe(200);
+      // 200 and 503 are irreversible in opposite directions, so the status is
+      // the assertion that matters — an eaten message also produces 200.
+      expect(response.status).toBe(503);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining("before initialize()"),
+        expect.objectContaining({ messageId: "msg_1" }),
+      );
+    });
+
+    it("lets a redelivery through after a failed dispatch rather than deduping it away", async () => {
+      // The ID is recorded before dispatch to stop concurrent duplicates, so
+      // it has to be withdrawn when dispatch throws — otherwise TikTok's
+      // retry is silently discarded as a duplicate and the message is lost.
+      const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+      let attempts = 0;
+      const chat = {
+        getLogger: () => logger,
+        processMessage: () => {
+          attempts += 1;
+          if (attempts === 1) {
+            throw new Error("host handler blew up");
+          }
+          return Promise.resolve();
+        },
+      };
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      const request = () => local.handleWebhook(webhookRequest("im_receive_msg", messageContent()));
+      await request();
+      await request();
+
+      expect(attempts).toBe(2);
     });
 
     it("refuses a webhook addressed to a different business account", async () => {
@@ -706,8 +750,8 @@ describe("TikTokAdapter", () => {
     it("returns messages oldest first regardless of TikTok's ordering", async () => {
       const { adapter: local } = build(
         listFetchOf([
-          restMessage({ message_id: "newer", timestamp: 2000 }),
-          restMessage({ message_id: "older", timestamp: 1000 }),
+          restMessage({ message_id: "newer", timestamp: 1700000002000 }),
+          restMessage({ message_id: "older", timestamp: 1700000001000 }),
         ]),
       );
 
@@ -719,9 +763,9 @@ describe("TikTokAdapter", () => {
     it("keeps the newest when a limit trims the page", async () => {
       const { adapter: local } = build(
         listFetchOf([
-          restMessage({ message_id: "a", timestamp: 1000 }),
-          restMessage({ message_id: "b", timestamp: 2000 }),
-          restMessage({ message_id: "c", timestamp: 3000 }),
+          restMessage({ message_id: "a", timestamp: 1700000001000 }),
+          restMessage({ message_id: "b", timestamp: 1700000002000 }),
+          restMessage({ message_id: "c", timestamp: 1700000003000 }),
         ]),
       );
 
@@ -1285,10 +1329,17 @@ describe("TikTokAdapter", () => {
       expect(seen).toHaveLength(2);
     });
 
-    it("drops a receipt it cannot date rather than assuming now", async () => {
-      // `toDate` falls back to the present, which is fine for a message's own
-      // timestamp and wrong for a high-water mark: it would mark messages read
-      // that were sent after the receipt was emitted.
+    it.each([
+      ["not a number", "not-a-number"],
+      ["zero", 0],
+      ["negative", -1],
+      // Seconds rather than milliseconds: finite and positive, so every other
+      // check passes while it decodes to 1970 and marks nothing as read.
+      ["seconds instead of milliseconds", 1_700_000_000],
+    ])("drops a receipt it cannot date rather than assuming now (%s)", async (_label, stamp) => {
+      // A substituted "now" is worse than no receipt: this value is a
+      // high-water mark, so it would mark messages read that were sent after
+      // the receipt was emitted.
       const seen: unknown[] = [];
       const { local, logger } = buildWith((event) => seen.push(event));
       await local.initialize({ getLogger: () => logger } as never);
@@ -1296,12 +1347,15 @@ describe("TikTokAdapter", () => {
       await local.handleWebhook(
         webhookRequest("im_mark_read_msg", {
           ...readContent,
-          read: { last_read_timestamp: "not-a-number" },
+          read: { last_read_timestamp: stamp },
         }),
       );
 
       expect(seen).toHaveLength(0);
-      expect(logger.debug).toHaveBeenCalledWith("Ignoring an incomplete TikTok read receipt");
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Ignoring an incomplete TikTok read receipt",
+        expect.anything(),
+      );
     });
 
     it("accepts a numeric timestamp sent as a string", async () => {
@@ -1365,7 +1419,10 @@ describe("TikTokAdapter", () => {
       );
 
       expect(seen).toHaveLength(0);
-      expect(logger.debug).toHaveBeenCalledWith("Ignoring an incomplete TikTok read receipt");
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Ignoring an incomplete TikTok read receipt",
+        expect.anything(),
+      );
     });
   });
 
@@ -1552,7 +1609,7 @@ describe("TikTokAdapter", () => {
             type: "EMOJI",
             emoji: "👍",
             unique_identifier: USER_ID,
-            timestamp: 1,
+            timestamp: 1700000000000,
             original_msg_id: "msg_target",
           },
         ]),
@@ -1587,7 +1644,7 @@ describe("TikTokAdapter", () => {
             type: "EMOJI",
             emoji: "👍",
             unique_identifier: "reactor_a",
-            timestamp: 1,
+            timestamp: 1700000000000,
             original_msg_id: "msg_target",
           },
           {
@@ -1595,7 +1652,7 @@ describe("TikTokAdapter", () => {
             type: "EMOJI",
             emoji: "🎉",
             unique_identifier: "reactor_b",
-            timestamp: 2,
+            timestamp: 1700000001000,
             original_msg_id: "msg_target",
           },
         ]),
@@ -1612,7 +1669,7 @@ describe("TikTokAdapter", () => {
             type: "EMOJI",
             emoji: "👍",
             unique_identifier: USER_ID,
-            timestamp: 1,
+            timestamp: 1700000000000,
             original_msg_id: "msg_target",
           },
         ]),
@@ -1627,7 +1684,7 @@ describe("TikTokAdapter", () => {
         type: "EMOJI",
         emoji,
         unique_identifier: USER_ID,
-        timestamp: 1,
+        timestamp: 1700000000000,
         original_msg_id: "msg_target",
       });
 
@@ -1645,7 +1702,7 @@ describe("TikTokAdapter", () => {
             type: "AI_EMOJI",
             ai_emoji_url: "https://cdn/ai.png",
             unique_identifier: USER_ID,
-            timestamp: 1,
+            timestamp: 1700000000000,
             original_msg_id: "msg_target",
           },
         ]),
@@ -1667,7 +1724,7 @@ describe("TikTokAdapter", () => {
             type: "EMOJI",
             emoji: "👍",
             unique_identifier: USER_ID,
-            timestamp: 1,
+            timestamp: 1700000000000,
           },
         ]),
       );
@@ -1698,7 +1755,7 @@ describe("TikTokAdapter", () => {
         .mockResolvedValueOnce(okResponse({ message: { message_id: "msg_img" } }));
       const { adapter: local } = build(calls);
 
-      const result = await local.postMessage(threadFor(local), { files: [png] } as never);
+      const result = await local.postMessage(threadFor(local), { raw: "", files: [png] });
 
       expect(result.id).toBe("msg_img");
       const urls = calls.mock.calls.map((c) => c[0] as string);
@@ -1720,7 +1777,7 @@ describe("TikTokAdapter", () => {
       );
       const { adapter: local } = build(calls);
 
-      await expect(local.postMessage(threadFor(local), { files: [png] } as never)).rejects.toThrow(
+      await expect(local.postMessage(threadFor(local), { raw: "", files: [png] })).rejects.toThrow(
         /gates image support/,
       );
     });
@@ -1732,9 +1789,62 @@ describe("TikTokAdapter", () => {
       const { adapter: local } = build(calls);
 
       await expect(
-        local.postMessage(threadFor(local), { raw: "caption", files: [png] } as never),
+        local.postMessage(threadFor(local), { raw: "caption", files: [png] }),
       ).rejects.toThrow(/cannot combine text and an image/);
       expect(calls).not.toHaveBeenCalled();
+    });
+
+    it("accepts the postable shape the README documents", async () => {
+      // Typed, not cast: a cast here is what let the documented example drift
+      // into a shape that does not compile for a caller.
+      const message: AdapterPostableMessage = { raw: "", files: [png] };
+      const calls = vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({
+            capability_infos: [{ capability_type: "IMAGE_SEND", capability_result: true }],
+          }),
+        )
+        .mockResolvedValueOnce(okResponse({ media_id: "media_1" }))
+        .mockResolvedValueOnce(okResponse({ message: { message_id: "msg_img" } }));
+      const { adapter: local } = build(calls);
+
+      await expect(local.postMessage(threadFor(local), message)).resolves.toMatchObject({
+        id: "msg_img",
+      });
+    });
+
+    it("says TikTok gave no answer rather than blaming a region gate", async () => {
+      // An empty capability list is not a denial. Reporting it as one sends
+      // whoever reads it to investigate participant geography.
+      const calls = vi.fn(async () => okResponse({ capability_infos: [] }));
+      const { adapter: local } = build(calls);
+
+      await expect(local.postMessage(threadFor(local), { raw: "", files: [png] })).rejects.toThrow(
+        /did not report whether/,
+      );
+    });
+
+    it("probes the capability with the configured conversation type", async () => {
+      // A first-contact DM is a STRANGER conversation; probing it as SINGLE
+      // asks about one that does not exist.
+      const calls = vi.fn(async () => okResponse({ capability_infos: [] }));
+      const local = new TikTokAdapter({
+        appId: "app_1",
+        appSecret: APP_SECRET,
+        businessId: BUSINESS_ID,
+        accessToken: "access_1",
+        refreshToken: "refresh_1",
+        accessTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        conversationType: "STRANGER",
+        fetchImpl: calls as never,
+      });
+
+      await expect(
+        local.postMessage(threadFor(local), { raw: "", files: [png] }),
+      ).rejects.toThrow();
+      const url = new URL(calls.mock.calls[0]?.[0] as string);
+      expect(url.searchParams.get("conversation_type")).toBe("STRANGER");
     });
 
     it("refuses more than one image per message", async () => {
@@ -1742,7 +1852,7 @@ describe("TikTokAdapter", () => {
       const { adapter: local } = build(calls);
 
       await expect(
-        local.postMessage(threadFor(local), { files: [png, png] } as never),
+        local.postMessage(threadFor(local), { raw: "", files: [png, png] }),
       ).rejects.toThrow(/one image per message/);
       expect(calls).not.toHaveBeenCalled();
     });
@@ -1858,7 +1968,7 @@ describe("TikTokAdapter", () => {
     it("returns TikTok's paging fields untouched", async () => {
       const listFetch = vi.fn(async () =>
         okResponse({
-          conversations: [{ conversation_id: "c1", update_time: 1000 }],
+          conversations: [{ conversation_id: "c1", update_time: 1700000001000 }],
           has_more: true,
           cursor: 42,
         }),
@@ -1890,8 +2000,8 @@ describe("TikTokAdapter", () => {
         .mockResolvedValueOnce(
           okResponse({
             conversations: [
-              { conversation_id: "c1", update_time: 1000 },
-              { conversation_id: "c2", update_time: 2000 },
+              { conversation_id: "c1", update_time: 1700000001000 },
+              { conversation_id: "c2", update_time: 1700000002000 },
             ],
             has_more: false,
             cursor: 0,
@@ -1904,7 +2014,7 @@ describe("TikTokAdapter", () => {
 
       expect(result.threads).toHaveLength(2);
       expect(result.threads[0]?.rootMessage.text).toBe("from history");
-      expect(result.threads[0]?.lastReplyAt?.getTime()).toBe(1000);
+      expect(result.threads[0]?.lastReplyAt?.getTime()).toBe(1700000001000);
       expect(listAndHistory).toHaveBeenCalledTimes(3); // one list + two histories
       expect(result.nextCursor).toBeUndefined();
     });
@@ -1914,7 +2024,7 @@ describe("TikTokAdapter", () => {
         .fn()
         .mockResolvedValueOnce(
           okResponse({
-            conversations: [{ conversation_id: "c1", update_time: 1000 }],
+            conversations: [{ conversation_id: "c1", update_time: 1700000001000 }],
             has_more: true,
             cursor: 7,
           }),
@@ -1928,25 +2038,109 @@ describe("TikTokAdapter", () => {
     });
 
     it("skips a conversation it cannot read rather than failing the page", async () => {
+      // A problem with one conversation, not with the connection.
       const listAndHistory = vi
         .fn()
         .mockResolvedValueOnce(
           okResponse({
             conversations: [
-              { conversation_id: "c1", update_time: 1000 },
-              { conversation_id: "c2", update_time: 2000 },
+              { conversation_id: "c1", update_time: 1700000001000 },
+              { conversation_id: "c2", update_time: 1700000002000 },
             ],
             has_more: false,
             cursor: 0,
           }),
         )
-        .mockResolvedValueOnce(errorResponse(TIKTOK_CODE.NO_PERMISSION))
+        .mockResolvedValueOnce(errorResponse(TIKTOK_CODE.NOT_FOUND))
         .mockResolvedValue(okResponse({ messages: [restMessage()], participants: [] }));
       const { adapter: local } = build(listAndHistory);
 
       const result = await local.listThreads(channelId(local));
 
       expect(result.threads).toHaveLength(1);
+    });
+
+    it("surfaces an account-wide failure instead of returning an empty page", async () => {
+      // An expired token throws for every conversation on the page. Skipping
+      // each one turns a dead integration into a result indistinguishable
+      // from an account that simply has no conversations.
+      const listAndHistory = vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({
+            conversations: [
+              { conversation_id: "c1", update_time: 1700000001000 },
+              { conversation_id: "c2", update_time: 1700000002000 },
+            ],
+            has_more: false,
+            cursor: 0,
+          }),
+        )
+        .mockResolvedValue(errorResponse(TIKTOK_CODE.NO_PERMISSION));
+      const { adapter: local } = build(listAndHistory);
+
+      await expect(local.listThreads(channelId(local))).rejects.toThrow();
+    });
+
+    it("skips and reports a conversation whose history is empty", async () => {
+      // ThreadSummary requires a root message, so it cannot be reported — and
+      // without the log the caller sees a short page with nothing to explain
+      // it.
+      const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+      const listAndHistory = vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({
+            conversations: [{ conversation_id: "c1", update_time: 1700000001000 }],
+            has_more: false,
+            cursor: 0,
+          }),
+        )
+        .mockResolvedValue(okResponse({ messages: [], participants: [] }));
+      const { adapter: local } = build(listAndHistory);
+      await local.initialize({ getLogger: () => logger } as never);
+
+      const result = await local.listThreads(channelId(local));
+
+      expect(result.threads).toHaveLength(0);
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Skipping a TikTok conversation whose history is empty",
+        expect.objectContaining({ conversationId: "c1" }),
+      );
+    });
+
+    it("forwards paging and conversation type to the conversation list", async () => {
+      // Without this a host paging through threads loops on page one, and an
+      // account whose traffic is mostly non-followers lists nothing at all.
+      const listAndHistory = vi
+        .fn()
+        .mockResolvedValueOnce(okResponse({ conversations: [], has_more: false, cursor: 0 }));
+      const { adapter: local } = build(listAndHistory);
+
+      await local.listThreads(channelId(local), {
+        cursor: "40",
+        limit: 7,
+        conversationType: "STRANGER",
+      });
+
+      const url = new URL(listAndHistory.mock.calls[0]?.[0] as string);
+      expect(url.searchParams.get("cursor")).toBe("40");
+      expect(url.searchParams.get("limit")).toBe("7");
+      expect(url.searchParams.get("conversation_type")).toBe("STRANGER");
+    });
+
+    it("omits paging parameters it was not given", async () => {
+      // `String(undefined)` would send the literal text "undefined".
+      const listAndHistory = vi
+        .fn()
+        .mockResolvedValueOnce(okResponse({ conversations: [], has_more: false, cursor: 0 }));
+      const { adapter: local } = build(listAndHistory);
+
+      await local.listConversations();
+
+      const url = new URL(listAndHistory.mock.calls[0]?.[0] as string);
+      expect(url.searchParams.has("cursor")).toBe(false);
+      expect(url.searchParams.has("limit")).toBe(false);
     });
 
     it("refuses a channel belonging to a different business account", async () => {
@@ -2018,5 +2212,328 @@ describe("TikTokAdapter", () => {
     ])("throws NotImplementedError from %s", async (_label, call) => {
       await expect(call()).rejects.toBeInstanceOf(NotImplementedError);
     });
+  });
+});
+
+describe("gaps found in the pre-release review", () => {
+  function threadFor(local: TikTokAdapter) {
+    return local.encodeThreadId({ businessId: BUSINESS_ID, conversationId: CONVERSATION_ID });
+  }
+
+  function channelOf(local: TikTokAdapter) {
+    return local.channelIdFromThreadId(threadFor(local));
+  }
+
+  describe("echo suppression", () => {
+    it("does not mark a user's message as ours merely because TikTok tagged it API", async () => {
+      // The business-account check is the half that matters here: without it
+      // any inbound message TikTok tags `API` is treated as our own echo and
+      // dropped by the SDK, and the bot goes deaf.
+      const { chat, processed, logger } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      await local.handleWebhook(
+        webhookRequest(
+          "im_receive_msg",
+          messageContent({
+            from_user: { id: USER_ID, role: "personal_account" },
+            message_tag: { source: "API" },
+          }),
+        ),
+      );
+
+      expect(processed).toHaveLength(1);
+      const message = await processed[0]?.factory();
+      expect((message as { author: { isMe: boolean } }).author.isMe).toBe(false);
+      void logger;
+    });
+
+    it("treats an untagged message from our own account as our echo", async () => {
+      // Fails closed. Mistaking our own message for the customer's makes the
+      // bot answer itself, and each answer echoes back to start another round.
+      const { chat, processed, logger } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      await local.handleWebhook(
+        webhookRequest(
+          "im_send_msg",
+          messageContent({
+            message_id: "msg_untagged",
+            from_user: { id: BUSINESS_ID, role: "business_account" },
+            message_tag: undefined,
+          }),
+        ),
+      );
+
+      const message = await processed[0]?.factory();
+      expect((message as { author: { isMe: boolean } }).author.isMe).toBe(true);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("no message_tag"),
+        expect.anything(),
+      );
+    });
+  });
+
+  describe("channel ownership", () => {
+    it("refuses a channel belonging to another business account", async () => {
+      const { adapter: local } = build();
+      const foreign = local.channelIdFromThreadId(
+        local.encodeThreadId({ businessId: "biz_other", conversationId: CONVERSATION_ID }),
+      );
+
+      await expect(local.fetchChannelInfo(foreign)).rejects.toThrow(/different business account/);
+    });
+
+    it("queries the account the channel names", async () => {
+      // Pins which ID reaches the wire, so substituting the adapter's own
+      // cannot pass unnoticed.
+      const calls = vi.fn(async () => okResponse({ username: "acme", display_name: "Acme" }));
+      const { adapter: local } = build(calls);
+
+      await local.fetchChannelInfo(channelOf(local));
+
+      const url = new URL(calls.mock.calls[0]?.[0] as string);
+      expect(url.searchParams.get("business_id")).toBe(BUSINESS_ID);
+    });
+  });
+
+  describe("webhook payload guards", () => {
+    it("refuses a message with no conversation, rather than throwing downstream", async () => {
+      // Without a conversation ID `encodeThreadId` throws mid-dispatch and the
+      // message is lost behind a generic error line.
+      const { chat, processed, logger } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      const response = await local.handleWebhook(
+        webhookRequest("im_receive_msg", messageContent({ conversation_id: "" })),
+      );
+
+      expect(response.status).toBe(200);
+      expect(processed).toHaveLength(0);
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Ignoring a TikTok message with no ID or conversation",
+        expect.anything(),
+      );
+    });
+
+    it("reports a stripped EU message above debug level", async () => {
+      // A real customer messaged the account and will get no reply. At debug
+      // that is invisible in production, for an entire regulatory region.
+      const { chat, logger } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      await local.handleWebhook(webhookRequest("im_receive_msg_eu", { to_user: BUSINESS_ID }));
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("EEA, Swiss or UK"),
+        expect.anything(),
+      );
+    });
+
+    it("warns when a message carries no sender identity", async () => {
+      const { chat, processed, logger } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      await local.handleWebhook(
+        webhookRequest(
+          "im_receive_msg",
+          messageContent({ from_user: undefined, unique_identifier: undefined }),
+        ),
+      );
+
+      await processed[0]?.factory();
+      expect(logger.warn).toHaveBeenCalledWith(
+        "A TikTok message carried no sender identity",
+        expect.anything(),
+      );
+    });
+  });
+
+  describe("timestamps", () => {
+    it("accepts an int64 timestamp sent as a string", async () => {
+      // `Number.isFinite("1700000000000")` is false, so a string stamp would
+      // be discarded as malformed and dated "now" instead.
+      const calls = vi.fn(async () =>
+        okResponse({
+          messages: [restMessage({ timestamp: "1700000009000" })],
+          participants: [],
+        }),
+      );
+      const { adapter: local } = build(calls);
+
+      const result = await local.fetchMessages(threadFor(local));
+
+      expect(result.messages[0]?.metadata.dateSent.getTime()).toBe(1_700_000_009_000);
+    });
+
+    it("does not let an undated history entry sort itself newest", async () => {
+      // Dating it "now" makes it the newest message in the thread, so a
+      // `limit` trim keeps it and evicts a real one.
+      const calls = vi.fn(async () =>
+        okResponse({
+          messages: [
+            restMessage({ message_id: "real_old", timestamp: 1_700_000_000_000 }),
+            restMessage({ message_id: "undated", timestamp: undefined }),
+            restMessage({ message_id: "real_new", timestamp: 1_700_000_005_000 }),
+          ],
+          participants: [],
+        }),
+      );
+      const { adapter: local } = build(calls);
+
+      const result = await local.fetchMessages(threadFor(local), { limit: 1 });
+
+      expect(result.messages.map((m) => m.id)).toEqual(["real_new"]);
+    });
+
+    it("keeps an undated entry beside the neighbour it arrived next to", async () => {
+      // Carrying the previous entry's time forward is what preserves the
+      // order TikTok sent. Dropping to epoch zero instead would sort it to
+      // the very front, ahead of messages that genuinely predate it — which
+      // a `limit` trim then acts on.
+      const calls = vi.fn(async () =>
+        okResponse({
+          messages: [
+            restMessage({ message_id: "first", timestamp: 1_700_000_000_000 }),
+            restMessage({ message_id: "undated", timestamp: undefined }),
+            restMessage({ message_id: "last", timestamp: 1_700_000_005_000 }),
+          ],
+          participants: [],
+        }),
+      );
+      const { adapter: local } = build(calls);
+
+      const result = await local.fetchMessages(threadFor(local), { limit: 2 });
+
+      // Inherits "first"'s time, so it sorts immediately after it and the
+      // trim keeps the two newest: the undated entry and "last".
+      expect(result.messages.map((m) => m.id)).toEqual(["undated", "last"]);
+    });
+
+    it("warns rather than silently substituting a timestamp", async () => {
+      const { chat, logger } = attachChat();
+      const calls = vi.fn(async () =>
+        okResponse({ messages: [restMessage({ timestamp: "nonsense" })], participants: [] }),
+      );
+      const { adapter: local } = build(calls);
+      await local.initialize(chat as never);
+
+      await local.fetchMessages(threadFor(local));
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        "TikTok sent an unusable timestamp; substituting a fallback",
+        expect.objectContaining({ field: "history message" }),
+      );
+    });
+  });
+
+  describe("history rendering", () => {
+    it("reports an unrecognized history type instead of only labelling it", async () => {
+      // The webhook path logs this; without the same here, a type TikTok adds
+      // is visible in live traffic and invisible in history.
+      const { chat, logger } = attachChat();
+      const calls = vi.fn(async () =>
+        okResponse({
+          messages: [restMessage({ message_type: "SOMETHING_NEW" })],
+          participants: [],
+        }),
+      );
+      const { adapter: local } = build(calls);
+      await local.initialize(chat as never);
+
+      const result = await local.fetchMessages(threadFor(local));
+
+      expect(result.messages[0]?.text).toBe("[unsupported message]");
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Unrecognized TikTok message type in history",
+        expect.objectContaining({ messageType: "SOMETHING_NEW" }),
+      );
+    });
+
+    it("keeps a shared post's link out of history text only when absent", async () => {
+      const calls = vi.fn(async () =>
+        okResponse({
+          messages: [
+            restMessage({ message_type: "SHARE_POST", share_post: { embed_url: "https://x/1" } }),
+          ],
+          participants: [],
+        }),
+      );
+      const { adapter: local } = build(calls);
+
+      const result = await local.fetchMessages(threadFor(local));
+
+      expect(result.messages[0]?.text).toBe("[shared post] https://x/1");
+    });
+  });
+});
+
+describe("client key on the adapter's own OAuth leg", () => {
+  it("refreshes with the client key rather than the app ID", async () => {
+    // Refresh is the one OAuth call the adapter makes by itself, and the
+    // access token lives 24 hours — so getting this wrong breaks the
+    // integration a day after it is deployed, not at startup.
+    const refresh = vi.fn(async () =>
+      okResponse({
+        access_token: "access_2",
+        refresh_token: "refresh_2",
+        expires_in: 86_400,
+        refresh_token_expires_in: 31_536_000,
+        open_id: BUSINESS_ID,
+        scope: "user.info.basic",
+      }),
+    );
+    const local = new TikTokAdapter({
+      appId: "app_id_value",
+      clientKey: "client_key_value",
+      appSecret: APP_SECRET,
+      businessId: BUSINESS_ID,
+      accessToken: "access_1",
+      refreshToken: "refresh_1",
+      // Already expired, so the next call must refresh first.
+      accessTokenExpiresAt: Date.now() - 1000,
+      fetchImpl: refresh as never,
+    });
+
+    await local.startTyping(
+      local.encodeThreadId({ businessId: BUSINESS_ID, conversationId: CONVERSATION_ID }),
+    );
+
+    const body = JSON.parse((refresh.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.client_id).toBe("client_key_value");
+  });
+
+  it("uses the app ID for the OAuth leg when no client key is configured", async () => {
+    const refresh = vi.fn(async () =>
+      okResponse({
+        access_token: "access_2",
+        refresh_token: "refresh_2",
+        expires_in: 86_400,
+        refresh_token_expires_in: 31_536_000,
+        open_id: BUSINESS_ID,
+        scope: "user.info.basic",
+      }),
+    );
+    const local = new TikTokAdapter({
+      appId: "shared_value",
+      appSecret: APP_SECRET,
+      businessId: BUSINESS_ID,
+      accessToken: "access_1",
+      refreshToken: "refresh_1",
+      accessTokenExpiresAt: Date.now() - 1000,
+      fetchImpl: refresh as never,
+    });
+
+    await local.startTyping(
+      local.encodeThreadId({ businessId: BUSINESS_ID, conversationId: CONVERSATION_ID }),
+    );
+
+    const body = JSON.parse((refresh.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.client_id).toBe("shared_value");
   });
 });

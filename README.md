@@ -69,6 +69,7 @@ surfacing later as an opaque API rejection.
 | Variable | Required | Description |
 |---|---|---|
 | `TIKTOK_APP_ID` | Yes | App ID from the TikTok developer portal |
+| `TIKTOK_CLIENT_KEY` | If distinct | Client key, when your portal issues one separate from the App ID. See [App ID and client key](#app-id-and-client-key) |
 | `TIKTOK_APP_SECRET` | Yes | App secret. Also verifies webhook signatures |
 | `TIKTOK_BUSINESS_ID` | Yes | The connected account's `open_id` |
 | `TIKTOK_ACCESS_TOKEN` | Yes | Current access token |
@@ -78,7 +79,8 @@ surfacing later as an opaque API rejection.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `appId` | `string` | — | App ID. Sent as `client_id` on the token endpoints |
+| `appId` | `string` | — | App ID. Sent as `app_id` to token inspection and webhook configuration |
+| `clientKey` | `string` | `appId` | Client key. Sent as `client_key` / `client_id` on the OAuth leg, including token refresh |
 | `appSecret` | `string` | — | App secret, and the webhook signing key |
 | `businessId` | `string` | — | The `open_id` returned by the OAuth exchange; required on every API call |
 | `accessToken` | `string` | — | Current access token |
@@ -87,12 +89,13 @@ surfacing later as an opaque API rejection.
 | `refreshTokenExpiresAt` | `number` | unknown | Expiry in epoch milliseconds. Supplying it lets the adapter fail fast with a clear re-authorize error |
 | `onTokenRefresh` | `(tokens) => void \| Promise<void>` | — | Called with rotated credentials. Persist them |
 | `useTemplates` | `boolean` | `true` | Send fitting cards as native Q&A button cards. Set `false` to always send plain text |
+| `conversationType` | `"SINGLE"` \| `"STRANGER"` | `"SINGLE"` | Which conversations to list and probe. Use `"STRANGER"` for first-contact DMs from non-followers |
 | `userName` | `string` | `"tiktok-bot"` | Display name for the bot |
 | `onReferral` | `(event) => void \| Promise<void>` | — | Called when a user arrives via an ad or tiktok.me link |
 | `onReadReceipt` | `(event) => void \| Promise<void>` | — | Called when the user marks the conversation read |
 | `maxRateLimitRetries` | `number` | `2` | Retries for a throttled request. `0` disables |
 | `rateLimitRetryDelayMs` | `number` | `1000` | First retry delay, doubling each attempt |
-| `signatureToleranceSeconds` | `number` | `5` | Permitted webhook timestamp drift. This is what prevents replay |
+| `signatureToleranceSeconds` | `number` | `300` | Permitted webhook timestamp drift. This is what prevents replay |
 | `apiVersion` | `string` | `"v1.3"` | API version segment |
 | `baseUrl` | `string` | TikTok's host | Override the API host. Intended for testing |
 | `logger` | `Logger` | Chat SDK's | Logger override |
@@ -144,11 +147,10 @@ selects the credentials used to reply, and because an unverified body must not
 be able to drive tenant lookups.
 
 It also happens only once on purpose. TikTok's signature carries a timestamp
-checked against a five-second tolerance, so a second check after a slow tenant
-load would reject a delivery the first accepted — and TikTok retries anything
-that is not 2xx, so that delivery would loop forever. Set
-`signatureToleranceSeconds` on the *router* if your tenant lookups are slow;
-it is the only tolerance in play.
+checked against a tolerance, so a second check after a slow tenant load would
+reject a delivery the first accepted — and TikTok retries anything that is not
+2xx, so that delivery would loop forever. Set `signatureToleranceSeconds` on
+the *router*, not the adapters; it is the only tolerance in play.
 
 Every adapter must belong to the same TikTok app as the router, since one app
 secret signs them all. `register()` refuses a mismatch rather than letting
@@ -278,10 +280,38 @@ if (missing.length > 0) {
 
 `revokeAccessToken({ appId, appSecret, accessToken })` disconnects an account.
 
-TikTok names the application three different ways across these endpoints —
-`client_key` on the authorize URL, `client_id` on the token and revoke
-endpoints, and `app_id` on token inspection and webhook configuration. The
-helpers handle that; it is worth knowing if you ever call the API directly.
+### App ID and client key
+
+TikTok names the application three different ways: `client_key` on the
+authorize URL, `client_id` on the token, refresh and revoke endpoints, and
+`app_id` on token inspection and webhook configuration.
+
+Whether those are the same string depends on your app. Some developer portals
+issue one value; others issue a distinct **App ID** and **Client Key**. So the
+two are separate options:
+
+| Option | Sent as | Used by |
+|---|---|---|
+| `clientKey` | `client_key`, `client_id` | authorize URL, code exchange, **token refresh**, revoke |
+| `appId` | `app_id` | `getTokenInfo`, webhook configuration |
+
+`clientKey` defaults to `appId`, so if your portal shows one value you can keep
+passing `appId` alone and ignore this. If it shows two, set both:
+
+```typescript
+const adapter = createTikTokAdapter({
+  appId: process.env.TIKTOK_APP_ID,
+  clientKey: process.env.TIKTOK_CLIENT_KEY,
+  appSecret: process.env.TIKTOK_APP_SECRET,
+  // ...
+});
+```
+
+Getting this wrong is a slow failure rather than an obvious one. Messaging
+itself needs neither value — it authenticates with an `Access-Token` header —
+so a wrongly configured adapter sends and receives normally and then stops
+roughly 24 hours later, when the access token expires and the refresh is
+rejected.
 
 `businessId` comes from the response's `open_id` — the same value under a
 different name, and the one every messaging call needs.
@@ -339,8 +369,17 @@ Send an image by attaching it to a postable; the adapter checks the
 conversation's capability, uploads the file, and sends it:
 
 ```typescript
-await thread.post({ files: [{ data: pngBuffer, filename: "chart.png", mimeType: "image/png" }] });
+await thread.post({
+  raw: "",
+  files: [{ data: pngBuffer, filename: "chart.png", mimeType: "image/png" }],
+});
 ```
+
+The empty `raw` is required in both senses. Chat SDK's `AdapterPostableMessage`
+needs one of `raw` / `markdown` / `ast` / `card` — `files` is only ever a
+companion to them — and TikTok will not put text and an image in one message,
+so anything that renders to non-empty text alongside a file is refused rather
+than silently split across two sends. Send the caption as its own message.
 
 Inbound images and videos arrive as attachments whose bytes are **not**
 downloaded during parsing. History works the same way, with one caveat: the

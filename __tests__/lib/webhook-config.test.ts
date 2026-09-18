@@ -161,3 +161,39 @@ describe("deleteWebhookConfig", () => {
     ).rejects.toThrow();
   });
 });
+
+describe("webhook config — credential guards found in the pre-release review", () => {
+  it.each([
+    ["appId", { appId: "", appSecret: "secret_1" }],
+    ["appSecret", { appId: "app_1", appSecret: "" }],
+  ])("refuses a %s that is missing before sending anything", async (_label, creds) => {
+    // `JSON.stringify` drops an undefined value entirely, so an unset
+    // environment variable produces a request with no credential at all and
+    // an opaque remote error that names nothing.
+    const fetchImpl = vi.fn();
+
+    await expect(getWebhookConfig({ ...creds, fetchImpl: fetchImpl as never })).rejects.toThrow(
+      /is required/,
+    );
+    await expect(
+      setWebhookConfig({ ...creds, callbackUrl: "https://x/cb", fetchImpl: fetchImpl as never }),
+    ).rejects.toThrow(/is required/);
+    await expect(deleteWebhookConfig({ ...creds, fetchImpl: fetchImpl as never })).rejects.toThrow(
+      /is required/,
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the event type it was given when TikTok omits one", async () => {
+    // A caller reading `undefined` back would store it as the configuration.
+    const config = await setWebhookConfig({
+      ...CREDS,
+      callbackUrl: "https://x/cb",
+      fetchImpl: vi.fn(async () => envelope({ app_id: "app_1" })) as never,
+    });
+
+    expect(config.eventType).toBe("DIRECT_MESSAGE");
+    expect(config.callbackUrl).toBe("https://x/cb");
+  });
+});

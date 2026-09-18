@@ -40,7 +40,7 @@ export interface TikTokWebhookRouterOptions {
    */
   resolve?: TikTokAdapterResolver;
   /**
-   * Permitted signature timestamp drift, in seconds. Defaults to 5.
+   * Permitted signature timestamp drift, in seconds. Defaults to 300.
    *
    * This is the only tolerance that applies: the router verifies once for the
    * whole app, and adapters it dispatches to do not check again.
@@ -178,6 +178,18 @@ export class TikTokWebhookRouter {
     }
 
     if (!adapter) {
+      // Nothing registered and nothing to ask is not an answer about this
+      // account — it is a router that is not wired up yet, which a delivery
+      // moments later would find ready. Discarding it permanently would lose
+      // the messages that arrive during startup.
+      if (this.adapters.size === 0 && !this.options.resolve) {
+        this.logger.error("A TikTok webhook arrived before any adapter was registered", {
+          businessId,
+          logId,
+        });
+        return new Response("Router not ready", { status: 503 });
+      }
+
       // Named, because this path discards the delivery permanently and
       // "tenant X went quiet" is otherwise undiagnosable from the logs.
       this.logger.warn("No TikTok adapter is registered for this business account", {
@@ -188,8 +200,21 @@ export class TikTokWebhookRouter {
     }
 
     // A resolver may hand back an adapter from another app, which would make
-    // every delivery for it unverifiable.
-    this.assertSameApp(adapter);
+    // every delivery for it unverifiable. Refused here rather than thrown:
+    // `register` throws at wiring time, where an operator sees it, but at
+    // request time an escaping exception becomes a 500 and TikTok retries a
+    // misconfiguration that can never succeed. Permanent, like an unknown
+    // tenant, so it gets the same answer.
+    try {
+      this.assertSameApp(adapter);
+    } catch (error) {
+      this.logger.error("A resolved TikTok adapter belongs to a different app", {
+        error,
+        businessId,
+        logId,
+      });
+      return new Response("OK", { status: 200 });
+    }
 
     // The body is passed already verified. Handing over a rebuilt Request for
     // the adapter to check again would re-run the timestamp tolerance under a

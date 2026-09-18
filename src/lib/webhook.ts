@@ -1,7 +1,23 @@
 import crypto from "node:crypto";
 
 export const SIGNATURE_HEADER = "tiktok-signature";
-export const DEFAULT_SIGNATURE_TOLERANCE_SECONDS = 5;
+/**
+ * Permitted signature timestamp drift, in seconds.
+ *
+ * TikTok's own sample uses five, which is a sample rather than a security
+ * requirement and is far too tight to run on. The budget has to cover network
+ * transit, a cold start, time queued behind other work, and any clock skew on
+ * the host — and it is spent before verification, not after. When it is
+ * exceeded the delivery is answered 401, which makes TikTok replay the *same
+ * signed timestamp*, so every retry is staler than the last: a host whose
+ * clock is six seconds off rejects one hundred percent of its messages,
+ * forever, while logging nothing louder than a warning.
+ *
+ * Five minutes is the usual replay window for signed webhooks and is what a
+ * timestamp check is actually for — stopping a captured delivery from being
+ * replayed hours later, not policing NTP.
+ */
+export const DEFAULT_SIGNATURE_TOLERANCE_SECONDS = 300;
 
 export interface ParsedSignature {
   /** Unix epoch **seconds**. */
@@ -30,8 +46,12 @@ export function parseSignatureHeader(header: string): ParsedSignature | null {
     const value = part.slice(separator + 1).trim();
 
     if (key === "t") {
+      // `Number("")` is 0, which is finite — so a header with an empty `t=`
+      // would parse as a valid epoch and be reported downstream as a
+      // signature mismatch, sending whoever debugs it after the app secret
+      // instead of the malformed header in front of them.
       const parsed = Number(value);
-      if (Number.isFinite(parsed)) {
+      if (value !== "" && Number.isInteger(parsed) && parsed > 0) {
         timestamp = parsed;
       }
     } else if (key === "s") {

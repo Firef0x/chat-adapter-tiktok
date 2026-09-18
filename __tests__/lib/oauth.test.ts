@@ -194,11 +194,26 @@ describe("exchangeAuthCode", () => {
     ).rejects.toBeInstanceOf(NetworkError);
   });
 
-  it("refuses an incomplete token response rather than returning junk", async () => {
-    // Half-populated credentials would be persisted and fail much later.
+  it.each([
+    ["access_token", "access_token"],
+    ["refresh_token", "refresh_token"],
+    ["expires_in", "expires_in"],
+    ["refresh_token_expires_in", "refresh_token_expires_in"],
+    ["open_id", "open_id"],
+  ])("refuses a token response missing %s rather than returning junk", async (_label, field) => {
+    // Every field is checked, not just the two that happened to have tests: a
+    // half-populated set is persisted by the host's onTokenRefresh over
+    // credentials that worked, and the connection breaks on the next restart
+    // with nothing to say which field was missing.
     await expect(
-      exchange(vi.fn(async () => tokenEnvelope({ refresh_token: undefined }))),
+      exchange(vi.fn(async () => tokenEnvelope({ [field]: undefined }))),
     ).rejects.toThrow(/incomplete token response/);
+  });
+
+  it("names the field it is missing", async () => {
+    await expect(
+      exchange(vi.fn(async () => tokenEnvelope({ open_id: undefined }))),
+    ).rejects.toThrow(/open_id/);
   });
 });
 
@@ -385,5 +400,115 @@ describe("splitScopes", () => {
     expect(splitScopes(undefined)).toEqual([]);
     expect(splitScopes("")).toEqual([]);
     expect(splitScopes(",,")).toEqual([]);
+  });
+});
+
+describe("oauth — gaps found in the pre-release review", () => {
+  it("omits disable_auto_auth unless consent is forced", () => {
+    // Only its presence was asserted. Always setting it would silently force
+    // the consent screen on every authorization, which is the opposite of the
+    // default and a change nobody would see.
+    const url = new URL(buildAuthorizeUrl({ appId: "app_1", redirectUri: "https://x/cb" }));
+
+    expect(url.searchParams.has("disable_auto_auth")).toBe(false);
+  });
+
+  it("falls back to the app ID it was given when TikTok omits one", async () => {
+    // TikTok's token_info response is not guaranteed to echo app_id, and a
+    // caller reading `undefined` back would store it.
+    const info = await getTokenInfo({
+      appId: "app_1",
+      accessToken: "access_1",
+      fetchImpl: vi.fn(async () =>
+        infoEnvelope({ creator_id: "biz_1", scope: "user.info.basic" }),
+      ) as never,
+    });
+
+    expect(info.appId).toBe("app_1");
+  });
+
+  it("names the app app_id on token inspection, not client_id", async () => {
+    // Three naming conventions exist across this API and this endpoint takes
+    // no secret at all.
+    const fetchImpl = vi.fn(async () =>
+      infoEnvelope({ app_id: "app_1", creator_id: "biz_1", scope: "" }),
+    );
+
+    await getTokenInfo({
+      appId: "app_1",
+      accessToken: "access_1",
+      fetchImpl: fetchImpl as never,
+    });
+
+    const body = JSON.parse((fetchImpl.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body).toMatchObject({ app_id: "app_1", access_token: "access_1" });
+    expect(body).not.toHaveProperty("client_id");
+    expect(body).not.toHaveProperty("secret");
+  });
+});
+
+describe("client key and app ID as separate identifiers", () => {
+  // TikTok names one application three ways, and some developer portals issue
+  // two different strings. The OAuth leg takes the client key; token
+  // inspection and webhook configuration take the app ID. Overloading one
+  // field works only while they happen to be equal.
+  const DISTINCT = { appId: "app_id_value", clientKey: "client_key_value" };
+
+  it("puts the client key on the authorize URL", () => {
+    const url = new URL(
+      buildAuthorizeUrl({ ...DISTINCT, redirectUri: "https://x/cb", state: "s" }),
+    );
+
+    expect(url.searchParams.get("client_key")).toBe("client_key_value");
+  });
+
+  it("sends the client key as client_id when exchanging a code", async () => {
+    const fetchImpl = vi.fn(async () => tokenEnvelope());
+
+    await exchangeAuthCode({
+      ...DISTINCT,
+      appSecret: "secret_1",
+      authCode: "code_1",
+      redirectUri: "https://x/cb",
+      fetchImpl: fetchImpl as never,
+    });
+
+    const body = JSON.parse((fetchImpl.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.client_id).toBe("client_key_value");
+  });
+
+  it("sends the client key as client_id when revoking", async () => {
+    const fetchImpl = vi.fn(async () => infoEnvelope({}));
+
+    await revokeAccessToken({
+      ...DISTINCT,
+      appSecret: "secret_1",
+      accessToken: "access_1",
+      fetchImpl: fetchImpl as never,
+    });
+
+    const body = JSON.parse((fetchImpl.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.client_id).toBe("client_key_value");
+  });
+
+  it("sends the app ID, not the client key, when inspecting a token", async () => {
+    // The opposite direction: this endpoint wants app_id and takes no secret.
+    const fetchImpl = vi.fn(async () =>
+      infoEnvelope({ app_id: "app_id_value", creator_id: "biz_1", scope: "" }),
+    );
+
+    await getTokenInfo({ ...DISTINCT, accessToken: "access_1", fetchImpl: fetchImpl as never });
+
+    const body = JSON.parse((fetchImpl.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.app_id).toBe("app_id_value");
+  });
+
+  it("falls back to the app ID when no client key is given", () => {
+    // The common case, and what every existing caller relies on.
+    const url = new URL(
+      buildAuthorizeUrl({ appId: "shared_value", redirectUri: "https://x/cb", state: "s" }),
+    );
+
+    expect(url.searchParams.get("client_key")).toBe("shared_value");
   });
 });

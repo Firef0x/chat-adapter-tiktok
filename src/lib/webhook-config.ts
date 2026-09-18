@@ -1,3 +1,5 @@
+import { ValidationError } from "@chat-adapter/shared";
+
 import type { TikTokWebhookConfig, TikTokWebhookEventType } from "../types.js";
 import {
   fetchEnvelope,
@@ -5,6 +7,7 @@ import {
   TIKTOK_DEFAULT_API_VERSION,
   unwrapEnvelope,
 } from "./api-client.js";
+import { ADAPTER_NAME } from "./thread-id.js";
 
 /**
  * Shared by every call here.
@@ -30,6 +33,23 @@ interface WebhookConfigData {
   callback_url?: string;
 }
 
+/**
+ * Refuse a call that would go out without credentials.
+ *
+ * `JSON.stringify` drops an `undefined` value entirely, so an unset
+ * `process.env.TIKTOK_APP_SECRET` — the exact shape the README documents —
+ * produces a request body with no secret at all and an opaque `40002` from
+ * TikTok that names nothing. The adapter and the router both guard this;
+ * these functions are reached without either.
+ */
+function assertCredentials(options: WebhookConfigOptions): void {
+  for (const key of ["appId", "appSecret"] as const) {
+    if (!options[key]) {
+      throw new ValidationError(ADAPTER_NAME, `TikTok ${key} is required.`);
+    }
+  }
+}
+
 function endpoint(options: WebhookConfigOptions, action: string): string {
   const base = (options.baseUrl ?? TIKTOK_API_HOST).replace(/\/+$/, "");
   const version = options.apiVersion ?? TIKTOK_DEFAULT_API_VERSION;
@@ -47,6 +67,7 @@ function endpoint(options: WebhookConfigOptions, action: string): string {
 export async function getWebhookConfig(
   options: WebhookConfigOptions,
 ): Promise<TikTokWebhookConfig | null> {
+  assertCredentials(options);
   const eventType = options.eventType ?? "DIRECT_MESSAGE";
   const url = new URL(endpoint(options, "list"));
   url.searchParams.set("app_id", options.appId);
@@ -82,6 +103,7 @@ export async function getWebhookConfig(
 export async function setWebhookConfig(
   options: WebhookConfigOptions & { callbackUrl: string },
 ): Promise<TikTokWebhookConfig> {
+  assertCredentials(options);
   const eventType = options.eventType ?? "DIRECT_MESSAGE";
 
   const data = unwrapEnvelope(
@@ -113,6 +135,7 @@ export async function setWebhookConfig(
  * no separate webhook ID to pass.
  */
 export async function deleteWebhookConfig(options: WebhookConfigOptions): Promise<void> {
+  assertCredentials(options);
   unwrapEnvelope(
     await fetchEnvelope<WebhookConfigData>({
       url: endpoint(options, "delete"),

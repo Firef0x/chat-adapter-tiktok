@@ -15,6 +15,15 @@ export const TIKTOK_AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize";
 
 export interface AuthorizeUrlOptions {
   appId: string;
+  /**
+   * The value TikTok's OAuth endpoints call `client_key` / `client_id`.
+   *
+   * Separate from `appId` because the developer portal may issue two distinct
+   * identifiers: the OAuth leg takes the client key, while token inspection
+   * and webhook configuration take the app ID. Defaults to `appId`, which is
+   * correct when the portal shows one value under both names.
+   */
+  clientKey?: string;
   /** Must match the redirect URL registered for the app. */
   redirectUri: string;
   /** Opaque value echoed back on the redirect. Use it to defeat CSRF. */
@@ -30,12 +39,14 @@ export interface AuthorizeUrlOptions {
  *
  * Note the app is named `client_key` here but `client_id` on the token
  * endpoints — TikTok is inconsistent between the two legs, and using the wrong
- * one fails with an unhelpful error.
+ * one fails with an unhelpful error. Both take {@link AuthorizeUrlOptions.clientKey},
+ * which is a different identifier from the `app_id` that token inspection and
+ * webhook configuration want.
  */
 export function buildAuthorizeUrl(options: AuthorizeUrlOptions): string {
   const url = new URL(TIKTOK_AUTHORIZE_URL);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set("client_key", options.appId);
+  url.searchParams.set("client_key", options.clientKey ?? options.appId);
   url.searchParams.set("redirect_uri", options.redirectUri);
   url.searchParams.set("scope", (options.scopes ?? TIKTOK_MESSAGING_SCOPES).join(","));
   url.searchParams.set("state", options.state);
@@ -49,6 +60,8 @@ export function buildAuthorizeUrl(options: AuthorizeUrlOptions): string {
 
 export interface ExchangeCodeOptions {
   appId: string;
+  /** See {@link AuthorizeUrlOptions.clientKey}. Defaults to `appId`. */
+  clientKey?: string;
   appSecret: string;
   /**
    * The `code` query parameter from the redirect.
@@ -85,7 +98,7 @@ export async function exchangeAuthCode(options: ExchangeCodeOptions): Promise<Ti
     // The OAuth endpoints take credentials in the body and no auth header.
     // The code field is `auth_code`, not `code` as most providers use.
     body: {
-      client_id: options.appId,
+      client_id: options.clientKey ?? options.appId,
       client_secret: options.appSecret,
       grant_type: "authorization_code",
       auth_code: options.authCode,
@@ -167,6 +180,8 @@ export function toTokens(
 
 export interface RevokeTokenOptions {
   appId: string;
+  /** See {@link AuthorizeUrlOptions.clientKey}. Defaults to `appId`. */
+  clientKey?: string;
   appSecret: string;
   /** The access token to invalidate. */
   accessToken: string;
@@ -195,7 +210,7 @@ export async function revokeAccessToken(options: RevokeTokenOptions): Promise<vo
     url: `${base}/open_api/${version}/tt_user/oauth2/revoke/`,
     method: "POST",
     body: {
-      client_id: options.appId,
+      client_id: options.clientKey ?? options.appId,
       client_secret: options.appSecret,
       access_token: options.accessToken,
     },

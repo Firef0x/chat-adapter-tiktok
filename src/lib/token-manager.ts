@@ -24,6 +24,13 @@ export const REFRESH_SKEW_MS = 5 * 60 * 1000;
 
 export interface TokenManagerOptions {
   appId: string;
+  /**
+   * The value the refresh endpoint calls `client_id`. Defaults to `appId`.
+   *
+   * The developer portal may issue a client key distinct from the app ID;
+   * refresh is on the OAuth leg, so it takes the client key.
+   */
+  clientKey?: string;
   appSecret: string;
   accessToken: string;
   refreshToken: string;
@@ -142,7 +149,7 @@ export class TikTokTokenManager implements AccessTokenProvider {
       url,
       method: "POST",
       body: {
-        client_id: this.options.appId,
+        client_id: this.options.clientKey ?? this.options.appId,
         client_secret: this.options.appSecret,
         grant_type: "refresh_token",
         refresh_token: this.refreshToken,

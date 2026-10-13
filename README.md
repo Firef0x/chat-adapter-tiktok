@@ -58,6 +58,29 @@ export async function POST(request: Request) {
 }
 ```
 
+The response status is the adapter's one lever over TikTok's retries, and the
+two answers are irreversible in opposite directions: `200` means the delivery
+is never sent again, anything else means it is. So it answers `401` for a bad
+signature, `200` for a delivery it handled or one it could never handle (a
+malformed payload would fail identically every time), and `503` for a failure a
+retry would fix — a webhook arriving before `initialize()`, or the message
+pipeline failing before your handler ran.
+
+That last distinction matters for how you write handlers. Chat SDK records each
+message ID in its state store *before* running any handler, and a redelivery
+is deduplicated against that record for ten minutes (`dedupeTtlMs`). So:
+
+- **A handler that throws is not run again.** The adapter answers `503`, TikTok
+  redelivers, and the SDK drops the redelivery as a duplicate. Retry inside
+  the handler, or catch and log — throwing does not buy a second attempt.
+- **A state-store failure is recovered.** Nothing was recorded, so the
+  redelivery is the first real attempt. This is the common transient — a
+  briefly unreachable database — and the case a `200` would have lost.
+- **Handlers should be idempotent anyway.** A redelivery arriving *after* the
+  dedupe TTL runs the pipeline again. TikTok's retry schedule is undocumented,
+  so a handler that posted a reply and then threw could, in that window, post
+  it twice.
+
 `tiktok` is exported as a shorthand alias for `createTikTokAdapter`.
 
 ## Environment variables
@@ -174,6 +197,19 @@ Only personal accounts emit it — a business reading its own thread produces
 nothing — so it always means the other side saw your message. `readAt` is the
 point up to which everything has been read, not the time of a single message.
 
+**Throwing from the callback asks TikTok to redeliver.** The webhook is
+answered `503` and the callback runs again with the same event. That is the
+right answer for a transient failure — a database that was briefly
+unreachable — because dropping a receipt can be permanent: if the user reads
+and never writes again, no later receipt arrives to supersede the lost one, and
+the thread shows unread forever. It is the wrong answer for a bug, which
+replays until TikTok gives up. So throw what a retry will fix, and catch and
+log what it will not.
+
+Apply `readAt` as a maximum, not an overwrite — `max(existing, readAt)`. A
+redelivery can land after a newer receipt for the same conversation, and a
+host that overwrites would move the read mark backwards.
+
 ## Webhook configuration
 
 Register the callback URL programmatically instead of clicking through the
@@ -217,6 +253,11 @@ createTikTokAdapter({
   },
 });
 ```
+
+Unlike `onReadReceipt`, throwing here does not ask for a redelivery: the
+failure is logged and the webhook is answered `200`. A referral is not
+idempotent the way a receipt is — recording "this user arrived from ad X"
+twice is two arrivals — so a replay would be a worse default than a drop.
 
 ## Platform setup
 

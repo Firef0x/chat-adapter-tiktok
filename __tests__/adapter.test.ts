@@ -1,6 +1,6 @@
 import { ValidationError } from "@chat-adapter/shared";
 import type { AdapterPostableMessage } from "chat";
-import { NotImplementedError } from "chat";
+import { LockError, NotImplementedError } from "chat";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TikTokAdapter } from "../src/adapter.js";
@@ -104,7 +104,17 @@ function attachChat() {
   const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
   const chat = {
     getLogger: () => logger,
-    processMessage: (_adapter: unknown, threadId: string, factory: () => Promise<unknown>) => {
+    processMessage: (
+      _adapter: unknown,
+      threadId: string,
+      messageOrFactory: unknown | (() => Promise<unknown>),
+    ) => {
+      // The adapter parses eagerly and passes a Message; the SDK also accepts
+      // a factory. Normalize so tests can keep calling `factory()`.
+      const factory =
+        typeof messageOrFactory === "function"
+          ? (messageOrFactory as () => Promise<unknown>)
+          : async () => messageOrFactory;
       processed.push({ threadId, factory });
     },
   };
@@ -259,9 +269,14 @@ describe("TikTokAdapter", () => {
       await new Promise((resolve) => setImmediate(resolve));
       process.off("unhandledRejection", onRejection);
 
-      expect(response.status).toBe(200);
+      // Transient as far as the adapter can tell, so it asks for a replay —
+      // but it must still be a *response*, not an escaped rejection.
+      expect(response.status).toBe(503);
       expect(rejections).toHaveLength(0);
-      expect(logger.error).toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining("Asking TikTok to redeliver"),
+        expect.objectContaining({ messageId: "msg_1" }),
+      );
     });
 
     it("asks TikTok to redeliver a webhook that arrives before initialize", async () => {
@@ -293,10 +308,16 @@ describe("TikTokAdapter", () => {
       );
     });
 
-    it("lets a redelivery through after a failed dispatch rather than deduping it away", async () => {
-      // The ID is recorded before dispatch to stop concurrent duplicates, so
-      // it has to be withdrawn when dispatch throws — otherwise TikTok's
-      // retry is silently discarded as a duplicate and the message is lost.
+    it("asks for a redelivery after a failed dispatch and accepts it when it comes", async () => {
+      // The two halves have to agree. Withdrawing the seen-marker prepares
+      // for a retry; answering 503 is what makes TikTok send one. Either half
+      // alone is incoherent: a marker withdrawn for a retry that was refused,
+      // or a retry invited and then deduplicated away.
+      //
+      // This pins the adapter's side only: the replay reaches the SDK again.
+      // Whether the SDK runs the host's handler again is its own dedupe's
+      // decision — it does for a failure before its dedupe write, and does
+      // not for a handler that threw after it.
       const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
       let attempts = 0;
       const chat = {
@@ -313,10 +334,161 @@ describe("TikTokAdapter", () => {
       await local.initialize(chat as never);
 
       const request = () => local.handleWebhook(webhookRequest("im_receive_msg", messageContent()));
+      const first = await request();
+      const replay = await request();
+
+      expect(first.status).toBe(503);
+      expect(replay.status).toBe(200);
+      expect(attempts).toBe(2);
+    });
+
+    it("still deduplicates a redelivery of a message that was dispatched successfully", async () => {
+      // The withdrawal is specific to failure. A successful dispatch keeps
+      // its marker, or TikTok's ordinary retry of an accepted delivery would
+      // reach the host twice.
+      const { chat, processed } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      const request = () => local.handleWebhook(webhookRequest("im_receive_msg", messageContent()));
       await request();
       await request();
 
-      expect(attempts).toBe(2);
+      expect(processed).toHaveLength(1);
+    });
+
+    it("answers 200, not 503, when the message itself cannot be parsed", async () => {
+      // A parse failure is a pure function of the payload and fails the same
+      // way on every replay. Asking for one would loop until TikTok gave up,
+      // with a log blaming the host for the adapter's own problem.
+      const { chat, processed, logger } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+      // `parseMessage` is defensive enough that no payload reliably throws
+      // from it, so the failure is injected at the seam itself.
+      vi.spyOn(local, "parseMessage").mockImplementation(() => {
+        throw new TypeError("unexpected payload shape");
+      });
+
+      const response = await local.handleWebhook(
+        webhookRequest("im_receive_msg", messageContent()),
+      );
+
+      expect(response.status).toBe(200);
+      expect(processed).toHaveLength(0);
+      expect(logger.error).toHaveBeenCalledWith(
+        "Failed to process TikTok webhook",
+        expect.anything(),
+      );
+    });
+
+    it("treats the SDK dropping a message under its concurrency strategy as final", async () => {
+      // `LockError` is the host's "drop" strategy refusing a second message
+      // while the first is still being handled. That is a decision, not a
+      // failure: a 503 would ask TikTok to undo it, and the marker must stay
+      // so the redelivery does not reach the host either.
+      const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+      let attempts = 0;
+      const chat = {
+        getLogger: () => logger,
+        processMessage: () => {
+          attempts += 1;
+          return Promise.reject(new LockError("thread busy"));
+        },
+      };
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      const request = () => local.handleWebhook(webhookRequest("im_receive_msg", messageContent()));
+      const first = await request();
+      const replay = await request();
+
+      expect(first.status).toBe(200);
+      expect(replay.status).toBe(200);
+      expect(attempts).toBe(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("concurrency strategy"),
+        expect.objectContaining({ messageId: "msg_1" }),
+      );
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it("parses a plain text message without warning about missing media", async () => {
+      // Every message is offered to the attachment builder. A text message
+      // has no media to miss, and a warning on each one would bury the real
+      // signal — a payload that claimed an image and supplied no ID.
+      const { chat, processed, logger } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      await local.handleWebhook(webhookRequest("im_receive_msg", messageContent()));
+      const message = (await processed[0]?.factory()) as { attachments?: unknown[] };
+
+      expect(message.attachments ?? []).toHaveLength(0);
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it("warns when a payload claims an image but carries no media ID", async () => {
+      // The counterpart of the text case: this is the signal the warning
+      // exists for — the host will show "[image]" with no file behind it.
+      const { chat, processed, logger } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      await local.handleWebhook(
+        webhookRequest("im_receive_msg", { ...messageContent(), type: "image", image: {} }),
+      );
+      const message = (await processed[0]?.factory()) as { text: string; attachments?: unknown[] };
+
+      expect(message.text).toBe("[image]");
+      expect(message.attachments ?? []).toHaveLength(0);
+      expect(logger.warn).toHaveBeenCalledWith(
+        "A TikTok media message carried no media ID; sending it without a file",
+        expect.objectContaining({ label: "image", messageId: "msg_1" }),
+      );
+    });
+
+    it("skips a null reaction entry instead of failing the whole payload", async () => {
+      // A thrown TypeError would discard every reaction in the batch and be
+      // logged as a processing failure. A bad entry is skipped like any other
+      // unusable one.
+      const { chat, logger } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      const response = await local.handleWebhook(
+        webhookRequest("im_receive_msg", {
+          ...messageContent(),
+          type: "reaction",
+          reaction: [null],
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it("does not ask for a redelivery of a malformed reaction payload", async () => {
+      // Nothing a host does can throw on the reaction path — the SDK catches
+      // its own — so the only error possible is the payload's, and a replay
+      // would fail on it identically.
+      const { chat, logger } = attachChat();
+      const { adapter: local } = build();
+      await local.initialize(chat as never);
+
+      const response = await local.handleWebhook(
+        webhookRequest("im_receive_msg", {
+          ...messageContent(),
+          type: "reaction",
+          reaction: { not: "an array" },
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(logger.warn).toHaveBeenCalledWith(
+        "A TikTok reaction payload carried no reactions",
+        expect.anything(),
+      );
     });
 
     it("refuses a webhook addressed to a different business account", async () => {
@@ -1391,7 +1563,9 @@ describe("TikTokAdapter", () => {
       );
     });
 
-    it("does not turn a failing handler into a retried webhook", async () => {
+    it("returns 503 when the onReadReceipt handler fails so TikTok retries", async () => {
+      // A receipt is idempotent, so the replay is free; the drop would be
+      // permanent for a user who reads and never writes again.
       const { local, logger } = buildWith(() => {
         throw new Error("handler blew up");
       });
@@ -1399,11 +1573,29 @@ describe("TikTokAdapter", () => {
 
       const response = await local.handleWebhook(webhookRequest("im_mark_read_msg", readContent));
 
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(503);
       expect(logger.error).toHaveBeenCalledWith(
-        "The onReadReceipt handler failed",
-        expect.anything(),
+        expect.stringContaining("onReadReceipt handler failed"),
+        expect.objectContaining({ method: "onReadReceipt" }),
       );
+    });
+
+    it("returns 200 on replay after the handler recovers", async () => {
+      let calls = 0;
+      const { local, logger } = buildWith(() => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error("transient failure");
+        }
+      });
+      await local.initialize({ getLogger: () => logger } as never);
+
+      const first = await local.handleWebhook(webhookRequest("im_mark_read_msg", readContent));
+      expect(first.status).toBe(503);
+
+      const replay = await local.handleWebhook(webhookRequest("im_mark_read_msg", readContent));
+      expect(replay.status).toBe(200);
+      expect(calls).toBe(2);
     });
 
     it.each([

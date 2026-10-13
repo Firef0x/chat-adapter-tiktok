@@ -29,7 +29,7 @@ import type {
   ThreadSummary,
   WebhookOptions,
 } from "chat";
-import { ConsoleLogger, emoji, Message, NotImplementedError } from "chat";
+import { ConsoleLogger, emoji, LockError, Message, NotImplementedError } from "chat";
 
 import { TikTokApiClient } from "./lib/api-client.js";
 import { BoundedSet } from "./lib/bounded-set.js";
@@ -71,6 +71,12 @@ import type {
 
 /** TikTok rejects text longer than this outright. */
 const MAX_TEXT_LENGTH = 6000;
+
+/**
+ * Payload type words that promise a file. Lowercase, matching the webhook;
+ * the REST path lowercases its UPPERCASE vocabulary before looking here.
+ */
+const MEDIA_LABELS: ReadonlySet<string> = new Set(["image", "video", "sticker", "emoji"]);
 
 /**
  * Conversations listed per page by default.
@@ -145,9 +151,18 @@ function parseTimestamp(value: unknown): number | undefined {
  *
  * TikTok retries anything that is not 2xx and permanently discards anything
  * that is, so the two answers are irreversible in opposite directions. This
- * distinguishes the cases worth replaying from the malformed ones that would
- * fail identically forever. Not exported: it is an internal signal between
- * `processEnvelope` and `handleVerifiedWebhook`.
+ * distinguishes the cases worth replaying — the adapter not yet initialized,
+ * the host's read-receipt callback failing, the message pipeline failing
+ * before the host handled it — from a malformed payload that would fail
+ * identically forever.
+ *
+ * On the message path the replay rescues less than it might appear to. Chat
+ * SDK writes a persistent dedupe key for the message before any handler
+ * runs, so a handler that threw is *not* run again: the replay is dropped
+ * there. What the replay does recover is a failure before that write — the
+ * state store being unreachable — which is the common transient and the one
+ * a 200 would lose for good. Not exported: it is an internal signal between
+ * the dispatch paths and `handleVerifiedWebhook`.
  */
 class TransientWebhookError extends Error {
   constructor(
@@ -343,7 +358,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
           ...error.context,
           logId,
         });
-        return new Response("Adapter not ready", { status: 503 });
+        return new Response("Retry later", { status: 503 });
       }
 
       // A malformed payload must not trigger TikTok's retry loop — replaying
@@ -453,26 +468,59 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     });
 
     // Recorded before dispatch so a redelivery arriving while this one is
-    // still in flight is not processed twice, and withdrawn again if dispatch
-    // fails — otherwise a host handler that threw would leave the message
-    // marked delivered, and TikTok's retry would be deduplicated away.
+    // still in flight is not processed twice.
     this.seenMessages.add(content.message_id);
 
+    // Reactions stay outside the transient path below. `processReaction`
+    // catches its own failures, so nothing a host does can throw here; what
+    // can is a malformed payload, which a replay would fail on identically.
+    if (content.type === "reaction") {
+      this.dispatchReactions(this.chat, content, threadId, options);
+      return;
+    }
+
+    // Parsed here rather than in a factory handed to the SDK, so a parse
+    // failure is not mistaken for a host failure: it is a pure function of
+    // the payload and would fail the same way on every replay, which is the
+    // permanent case the catch below must not answer with a retry.
+    const message = this.parseMessage(content);
+
     try {
-      if (content.type === "reaction") {
-        this.dispatchReactions(this.chat, content, threadId, options);
+      await this.chat.processMessage(this, threadId, message, options);
+    } catch (error) {
+      // The SDK's "drop" concurrency strategy refuses a message that arrives
+      // while another is being handled in the same thread. That is a choice
+      // the host made, not a failure, and asking for a replay would undo it.
+      // The marker stays, because a redelivery is unwanted.
+      if (error instanceof LockError) {
+        this.logger.warn("A TikTok message was dropped by the host's concurrency strategy", {
+          messageId: content.message_id,
+          threadId,
+        });
         return;
       }
 
-      await this.chat.processMessage(
-        this,
-        threadId,
-        async () => this.parseMessage(content),
-        options,
-      );
-    } catch (error) {
+      // Withdrawing the marker only means something if a retry is actually
+      // asked for; taking it back and then answering 200 would prepare for a
+      // redelivery TikTok was just told not to send.
+      //
+      // What the retry recovers depends on where the failure happened. Chat
+      // SDK writes a persistent dedupe key for the message before it runs
+      // any handler, so a handler that threw is not run again — the replay
+      // is dropped there, and the host has to retry inside the handler. A
+      // failure *before* that write, the state store being unreachable, is
+      // what this rescues: nothing was recorded, and the replay is the first
+      // real attempt. The one way a replay runs the pipeline twice is a
+      // retry arriving after the SDK's dedupe TTL (ten minutes by default)
+      // for a handler that had side effects before it threw. TikTok's retry
+      // schedule is undocumented, so that window cannot be ruled out, and
+      // it is the reason handlers should be idempotent.
       this.seenMessages.delete(content.message_id);
-      throw error;
+      throw new TransientWebhookError("Dispatching a TikTok message to the host failed.", {
+        messageId: content.message_id,
+        event: envelope.event,
+        error,
+      });
     }
   }
 
@@ -565,9 +613,17 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
         raw: content,
       });
     } catch (error) {
-      // The host's own failure must not become a retried webhook, which would
-      // replay the same receipt and fail the same way.
-      this.logger.error("The onReadReceipt handler failed", { error });
+      // A receipt is a high-water mark, so a replay costs nothing for a host
+      // that applies `readAt` monotonically — while dropping it can be
+      // permanent: if the user reads and never writes again, no later receipt
+      // arrives to supersede the one that was lost, and the thread shows
+      // unread forever. A replay can land after a newer receipt, which is why
+      // the contract asks the host for `max(existing, readAt)`, not overwrite.
+      throw new TransientWebhookError("The onReadReceipt handler failed.", {
+        conversationId: content.conversation_id,
+        method: "onReadReceipt",
+        error,
+      });
     }
   }
 
@@ -587,7 +643,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     threadId: string,
     options?: WebhookOptions,
   ): void {
-    const entries = content.reaction ?? [];
+    const entries = Array.isArray(content.reaction) ? content.reaction : [];
     if (entries.length === 0) {
       // The payload said "reaction" and carried none, so the parsing
       // assumption is wrong — and the ID is already recorded as seen, so a
@@ -601,10 +657,13 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     const author = this.authorOf(content);
 
     for (const entry of entries) {
+      // One malformed entry must not take the rest of the batch with it: a
+      // thrown TypeError here would discard every reaction in the payload,
+      // and the reply path would answer 200, so none would come back.
       // AI emoji are images rather than characters, so the URL is the only
       // identity available for them.
-      const rawEmoji = entry.emoji ?? entry.ai_emoji_url;
-      if (!rawEmoji || !entry.original_msg_id) {
+      const rawEmoji = entry ? (entry.emoji ?? entry.ai_emoji_url) : undefined;
+      if (!entry || !rawEmoji || !entry.original_msg_id) {
         this.logger.debug("Ignoring an unusable TikTok reaction entry", {
           messageId: content.message_id,
         });
@@ -794,14 +853,18 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     const isImage = Boolean(media.imageId);
     const mediaId = media.imageId ?? media.videoId;
     if (!mediaId) {
-      // The host gets text reading "[image]" and no file. Absence is expected
-      // on the history response, whose media field names are unconfirmed, but
-      // on a webhook it means a documented field went missing — and either
-      // way the host is left showing a placeholder for nothing.
-      this.logger.warn("A TikTok media message carried no media ID; sending it without a file", {
-        label: media.label,
-        messageId: media.messageId,
-      });
+      // Every message passes through here, and most carry no media because
+      // they are text. The warning is for the other case: a payload whose
+      // type word *claims* media but supplies no ID or URL for it. The host
+      // then gets text reading "[image]" and no file — expected on the
+      // history response, whose media field names are unconfirmed, but on a
+      // webhook it means a documented field went missing.
+      if (MEDIA_LABELS.has(media.label)) {
+        this.logger.warn("A TikTok media message carried no media ID; sending it without a file", {
+          label: media.label,
+          messageId: media.messageId,
+        });
+      }
       return [];
     }
 

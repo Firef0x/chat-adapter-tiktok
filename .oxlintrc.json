@@ -20,7 +20,8 @@
     {
       "files": ["__tests__/**/*.ts"],
       "rules": {
-        "typescript/no-non-null-assertion": "off"
+        "typescript/no-non-null-assertion": "off",
+        "unicorn/consistent-function-scoping": "off"
       }
     }
   ]

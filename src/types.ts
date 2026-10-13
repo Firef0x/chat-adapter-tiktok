@@ -95,6 +95,11 @@ export interface TikTokAdapterConfig {
    * own event carrying no message, so it is not reachable from the message
    * stream. It is delivered here rather than through Chat SDK because the SDK
    * has no event for it.
+   *
+   * Unlike {@link TikTokAdapterConfig.onReadReceipt}, throwing here does
+   * **not** ask for a redelivery: the failure is logged and the webhook is
+   * answered 200. A referral is not idempotent in the way a receipt is —
+   * a host recording "this user arrived from ad X" twice has two arrivals.
    */
   onReferral?: (event: TikTokReferralEvent) => void | Promise<void>;
   /**
@@ -103,6 +108,16 @@ export interface TikTokAdapterConfig {
    * TikTok emits this only for personal accounts: a business reading its own
    * thread produces nothing. Chat SDK has no inbound read-receipt event, so
    * it is delivered here.
+   *
+   * **Throwing asks TikTok to redeliver** — the webhook is answered 503, and
+   * this callback runs again with the same event. That is the right answer
+   * for a transient failure such as a database being unreachable, because
+   * dropping a receipt can leave a thread unread forever. It is the wrong
+   * answer for a bug, which replays until TikTok gives up — so catch and log
+   * what will not be fixed by trying again, and throw only what will.
+   *
+   * Apply `readAt` as `max(existing, readAt)`, not an overwrite: a replay can
+   * arrive after a newer receipt, and overwriting would move the mark back.
    */
   onReadReceipt?: (event: TikTokReadReceiptEvent) => void | Promise<void>;
   /**

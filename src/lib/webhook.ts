@@ -81,6 +81,7 @@ export interface VerifyOptions {
   appSecret: string;
   /** Unix epoch milliseconds. */
   now?: number;
+  /** Defaults to {@link DEFAULT_SIGNATURE_TOLERANCE_SECONDS}, also when not a non-negative number. */
   toleranceSeconds?: number;
 }
 
@@ -91,13 +92,15 @@ export interface VerifyOptions {
  * throwing, so the caller can log the cause while still answering 401.
  */
 export function verifyWebhookSignature(options: VerifyOptions): VerificationResult {
-  const {
-    header,
-    rawBody,
-    appSecret,
-    now = Date.now(),
-    toleranceSeconds = DEFAULT_SIGNATURE_TOLERANCE_SECONDS,
-  } = options;
+  const { header, rawBody, appSecret, now = Date.now() } = options;
+  // A destructuring default covers only `undefined`. `NaN` would make the
+  // drift comparison below never true and so accept a capture replayed hours
+  // later; a negative value would reject every delivery. Zero is kept: it is
+  // a legitimate, if unusable, choice.
+  const toleranceSeconds =
+    Number.isFinite(options.toleranceSeconds) && (options.toleranceSeconds as number) >= 0
+      ? (options.toleranceSeconds as number)
+      : DEFAULT_SIGNATURE_TOLERANCE_SECONDS;
 
   if (!header) {
     return { valid: false, reason: "missing signature header" };

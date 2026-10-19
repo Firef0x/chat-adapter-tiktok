@@ -1152,7 +1152,10 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
   async sharePost(threadId: string, itemId: string): Promise<RawMessage<TikTokRawMessage>> {
     const { conversationId } = this.decodeThreadId(threadId);
 
-    if (!itemId.trim()) {
+    // Coerced first: an ID read from an untyped source can be `undefined`,
+    // which must fail as a validation error rather than a TypeError.
+    const id = String(itemId ?? "").trim();
+    if (!id) {
       throw new ValidationError(ADAPTER_NAME, "A post ID is required to share a post.");
     }
 
@@ -1161,7 +1164,7 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       recipient_type: "CONVERSATION",
       recipient: conversationId,
       message_type: "SHARE_POST",
-      share_post: { item_id: itemId },
+      share_post: { item_id: id },
     });
   }
 
@@ -1278,8 +1281,14 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
     messages.sort((a, b) => a.metadata.dateSent.getTime() - b.metadata.dateSent.getTime());
 
     // `limit: 0` means none. Testing truthiness would return everything, the
-    // opposite of what the caller asked for.
-    const limit = options?.limit;
+    // opposite of what the caller asked for. A limit that is not a finite
+    // number is refused rather than read as "everything": `NaN >= 0` is
+    // false, so it would silently return the whole page.
+    const requested = options?.limit;
+    if (requested !== undefined && !Number.isFinite(requested)) {
+      throw new ValidationError(ADAPTER_NAME, `Invalid TikTok history limit: ${requested}`);
+    }
+    const limit = requested === undefined ? undefined : Math.trunc(requested);
     const limited =
       limit !== undefined && limit >= 0 && limit < messages.length
         ? messages.slice(messages.length - limit)
@@ -1465,9 +1474,17 @@ export class TikTokAdapter implements Adapter<TikTokThreadId, TikTokRawMessage> 
       );
     }
 
+    // The cursor is TikTok's own numeric offset, echoed back as a string.
+    // Digits only: `Number("")` and `Number(" 5 ")` are integers too, and a
+    // garbled cursor read as zero would silently restart from page one.
+    const cursor = options?.cursor;
+    if (cursor !== undefined && !/^\d+$/.test(cursor)) {
+      throw new ValidationError(ADAPTER_NAME, `Invalid TikTok thread cursor: ${cursor}`);
+    }
+
     const limit = options?.limit ?? DEFAULT_THREAD_PAGE_SIZE;
     const page = await this.listConversations({
-      cursor: options?.cursor ? Number(options.cursor) : undefined,
+      cursor: cursor === undefined ? undefined : Number(cursor),
       limit,
       conversationType: options?.conversationType,
     });

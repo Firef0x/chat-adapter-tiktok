@@ -54,25 +54,25 @@
     "chat": "^4.40.0"
   },
   "dependencies": {
-    "@chat-adapter/shared": "^4.40.0"
+    "@chat-adapter/shared": "^4.43.0"
   },
   "devDependencies": {
-    "@types/node": "^26.5.1",
-    "@vitest/coverage-v8": "^4.0.0",
-    "chat": "^4.40.0",
-    "oxfmt": "^0.73.0",
-    "oxlint": "^1.88.0",
-    "tsup": "^8.5.1",
-    "typescript": "~5.9.3",
-    "vitest": "^4.0.0"
+    "@types/node": "^26.6.5",
+    "@vitest/coverage-v8": "^5.0.5",
+    "chat": "^4.43.0",
+    "oxfmt": "^0.74.0",
+    "oxlint": "^1.89.0",
+    "tsup": "^9.0.0",
+    "typescript": "~6.0.3",
+    "vitest": "^5.0.5"
   },
   "publishConfig": {
     "access": "public"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "allowScripts": {
-    "esbuild@0.27.7": true
+    "esbuild@0.28.2": true
   }
 }

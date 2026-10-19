@@ -112,6 +112,31 @@ describe("verifyWebhookSignature", () => {
     expect(result).toMatchObject({ valid: false });
   });
 
+  it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])(
+    "falls back to the default tolerance when given %s",
+    (toleranceSeconds) => {
+      // NaN would otherwise accept a capture replayed hours later, and a
+      // negative value would reject every delivery.
+      const fresh = verifyWebhookSignature({
+        header: validHeader(BODY, NOW_SECONDS - 2),
+        rawBody: BODY,
+        appSecret: SECRET,
+        now: NOW_MS,
+        toleranceSeconds,
+      });
+      expect(fresh).toEqual({ valid: true });
+
+      const stale = verifyWebhookSignature({
+        header: validHeader(BODY, NOW_SECONDS - 3600),
+        rawBody: BODY,
+        appSecret: SECRET,
+        now: NOW_MS,
+        toleranceSeconds,
+      });
+      expect(stale.valid).toBe(false);
+    },
+  );
+
   it("treats an explicit tolerance of 0 as zero, not as unset", () => {
     // `?? DEFAULT` only catches undefined, so 0 must genuinely mean 0.
     expect(

@@ -946,6 +946,17 @@ describe("TikTokAdapter", () => {
       expect(result.messages.map((m) => m.id)).toEqual(["b", "c"]);
     });
 
+    it.each([Number.NaN, Number.POSITIVE_INFINITY])(
+      "refuses the history limit %s instead of returning everything",
+      async (limit) => {
+        // `NaN >= 0` is false, so without the check the whole page came back.
+        const { adapter: local } = build(listFetchOf([restMessage(), restMessage()]));
+        await expect(local.fetchMessages(threadFor(local), { limit })).rejects.toBeInstanceOf(
+          ValidationError,
+        );
+      },
+    );
+
     it("treats limit 0 as none rather than everything", async () => {
       // `options.limit &&` made 0 falsy, returning the whole page.
       const { adapter: local } = build(listFetchOf([restMessage(), restMessage()]));
@@ -1299,6 +1310,8 @@ describe("TikTokAdapter", () => {
     it.each([
       ["empty", ""],
       ["whitespace only", "   "],
+      // What an untyped lookup hands over for a post that was never found.
+      ["missing", undefined as never],
     ])("rejects a %s post ID before calling the API", async (_label, itemId) => {
       // The sibling send paths use `.trim()` for their emptiness checks, so
       // this one must too or a blank ID reaches TikTok.
@@ -2320,6 +2333,19 @@ describe("TikTokAdapter", () => {
       expect(url.searchParams.get("limit")).toBe("7");
       expect(url.searchParams.get("conversation_type")).toBe("STRANGER");
     });
+
+    it.each(["", " 5", "abc", "-1", "1.5"])(
+      "refuses the thread cursor %j without a request",
+      async (cursor) => {
+        // `Number("")` is 0, so a garbled cursor restarted from page one.
+        const listFetch = vi.fn();
+        const { adapter: local } = build(listFetch);
+        await expect(local.listThreads(channelId(local), { cursor })).rejects.toBeInstanceOf(
+          ValidationError,
+        );
+        expect(listFetch).not.toHaveBeenCalled();
+      },
+    );
 
     it("omits paging parameters it was not given", async () => {
       // `String(undefined)` would send the literal text "undefined".
